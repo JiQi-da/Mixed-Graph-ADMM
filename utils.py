@@ -11,7 +11,7 @@ def physical_graph(df, sensor_dict=None):
     else:
         from_list = [sensor_dict[i] for i in df['from'].values]
         to_list = [sensor_dict[i] for i in df['to'].values]
-    n_edges = len(from_list) * 2
+    n_edges = len(from_list)#  * 2
     # bi-directional
     u_edges = np.array([from_list + to_list, to_list + from_list]).T
     dic = Counter([(u_edges[i,0], u_edges[i,1]) for i in range(n_edges)])
@@ -41,6 +41,26 @@ class TrafficDataset():
         x = self.data[index:index + 24]
         y = self.data[index:index + 12]
     
+def connect_list(n_nodes, edges, dists):
+    '''
+    return (N, k) where k is the maximum degree
+    '''
+    counts = np.zeros(n_nodes, dtype=int)
+    for edge in edges:
+        counts[edge[0]] += 1
+    k = counts.max()
+    print('max degrees', k)
+
+    connect_list = - np.ones((n_nodes, k), dtype=int)
+    dist_list = np.full((n_nodes, k), fill_value=np.inf)
+
+    for i in range(edges.shape(0)):
+        connect_list[edge[i,0], counts[edge[i,0]] - 1] = edges[i, 1]
+        dist_list[edge[0], counts[edge[i,0]] - 1] = dists[i, 1]
+        counts[edge[0]] -= 1
+    
+    assert np.all(counts == 0), "Counts should be a zero matrix after processing all edges"
+    return connect_list, dist_list # in (N, k)
 
 def k_nearest_neighbors(n_nodes, edges:np.ndarray, dists:np.ndarray, k):
     '''
@@ -66,7 +86,7 @@ def k_nearest_neighbors(n_nodes, edges:np.ndarray, dists:np.ndarray, k):
     return nearest_nodes, nearest_dists
 
 
-def mixed_graph_from_distance(nearest_nodes:np.ndarray, nearest_dists:np.ndarray, u_sigma=None, d_sigma=None):
+def mixed_graph_from_distance(connect_list:np.ndarray, dist_list:np.ndarray, nearest_nodes:np.ndarray, nearest_dists:np.ndarray, u_sigma=None, d_sigma=None, regularized=False):
     '''
     sigma: scalar, if None, sigma = max(dists) / 100
     -----------------------------------
@@ -84,12 +104,44 @@ def mixed_graph_from_distance(nearest_nodes:np.ndarray, nearest_dists:np.ndarray
         d_sigma = max(nearest_dists.max() / 50, nearest_dists.min() * 50)
         print(f'd_sigma = {d_sigma}, nearest_dist in ({nearest_dists.min():.4f}, {nearest_dists.max():.4f})')
     
-    undirected_weights = np.exp(- nearest_dists / u_sigma) # in (N, k + 1)
     directed_weights = np.exp(- nearest_dists / d_sigma) # in (N, k + 1)
-    zero_mask = nearest_nodes[nearest_nodes == -1]
-    undirected_weights[zero_mask] = 0
+    zero_mask = (nearest_nodes == -1)
     directed_weights[zero_mask] = 0
+
+    # expend dims
+    directed_weights = np.expand_dims(directed_weights, axis=0).repeat(24, 1, 1)
+
+    if regularized:
+        in_degree = directed_weights.sum(2, keepdims=True) # in (T, N, k)
+        inv_in_degree = np.where(in_degree > 0, 1 / in_degree, 0)
+        # double check
+        inv_in_degree = np.where(inv_in_degree == np.inf, 0, inv_in_degree)
+        directed_weights = directed_weights * in_degree
+
+    undirected_weights = np.exp(- dist_list / u_sigma)
+    zero_mask = (connect_list == -1)
+    undirected_weights[zero_mask] = 0
+
+    if regularized:
+        degree = undirected_weights.sum(2, keepdims=True)
+        degree_j = 
+
+
+
     undirected_weights = undirected_weights[:, 1:] # in (N, k)
+    # expand to full time
+    undirected_weights = np.expand_dims(undirected_weights, axis=0).repeat(24, 1, 1) # in (T, N, k)
+    directed_weights = np.expand_dims(directed_weights, axis=0).repeat(23, 1, 1)
+
+    if regularized:
+        # regularize undirected graph
+        # compute degrees
+        in_degree = undirected_weights.sum(2, keepdims=True)
+        out_degree = undirected_weights.reshape(24, -1)
+
+        # regularize directed graph
+        # np.sum()
+
 
     return undirected_weights, directed_weights # in (N, k), (N, k+1)
 

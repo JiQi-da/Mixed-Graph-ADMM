@@ -15,4 +15,8 @@ In this part we test about 3 methods:
 3. Introduce auxiliary variables $\mathbf{z}_u,\mathbf{z}_d$, optimize $\mathbf{x}, \mathbf{z}_u,\mathbf{z}_d$ and $\phi$ in the same loop.
 
 ## Mission
-To find what leads to `NaN` in computing 
+- Take notes of the ADMM's parameter to find the best to converge.
+- Take notes of what parameter leads to `NaN` in `L^d_r.T x`.
+- Check the results for CGD parameters.
+
+## Results
