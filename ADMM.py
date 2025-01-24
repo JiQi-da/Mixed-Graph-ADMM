@@ -87,6 +87,9 @@ class ADMM_algorithm():
     def RHS_x(self,):
         pass
 
+    def forward(self,)
+        pass
+
 
 
 data_dir = '../datasets/PEMS0X_data'
