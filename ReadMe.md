@@ -5,7 +5,7 @@ ADMM of the optimization without unrolling.
 ## Graph weights
 
 - Connections: $k$ nearest neighbors, same as [Unrolling-GSP-STForecast](https://github.com/JiQi-da/Unrolling-GSP-STForecast)
-- Graph weights: use a simple construction with $w_{ij}=\exp(-d_{ij}/\sigma)$, where $d_{ij}$ is the shortest path from Dijkstra Algorithm, and $j$ is one of $i$'s $k$NNs.
+- Graph weights: use a simple construction with $w_{ij}=\exp(-d_{ij}/\sigma)$, where $d_{ij}$ is the shortest path from Dijkstra Algorithm, and $j$ is one of $i$'s $k$-NNs.
 
 ## ADMM algorithm
 In this part we test about 3 methods:
