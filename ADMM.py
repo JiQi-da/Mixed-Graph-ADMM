@@ -81,7 +81,11 @@ class ADMM_algorithm():
         y = self.apply_op_Ldr_T(x)
         return y
     
-    
+    def CG_solver(self,):
+        pass
+
+    def RHS_x(self,):
+        pass
 
 
 
