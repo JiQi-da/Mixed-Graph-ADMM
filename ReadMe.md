@@ -20,3 +20,4 @@ In this part we test about 3 methods:
 - Check the results for CGD parameters.
 
 ## Results
+Log the results in Jupyter Notebook.
