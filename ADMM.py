@@ -1,7 +1,10 @@
+import os
+os.environ["KMP_DUPLICATE_LIB_OK"]="TRUE"
 import numpy as np
 import torch
 import os
 from utils import *
+import matplotlib.pyplot as plt
 
 
 class ADMM_algorithm():
@@ -22,12 +25,13 @@ class ADMM_algorithm():
 
         self.ablation = ablation
         assert ablation in ['None', 'DGTV', 'DGLR', 'UT'], "ablation should be in [\'None\', \'DGTV\', \'DGLR\', \'UT\']"
-        self.u_ew = undirected_graph_from_distance(self.connect_list, self.dist_list, sigma=u_sigma, regularized=True)
+        self.u_ew = undirected_graph_from_distance(self.connect_list, self.dist_list, u_sigma=u_sigma, regularized=True)
         if self.ablation != 'UT':
-            self.d_ew = directed_graph_from_distance(self.connect_list, self.dist_list, sigma=d_sigma, regularized=True)
+            self.d_ew = directed_graph_from_distance(self.connect_list, self.dist_list, d_sigma=d_sigma, regularized=True)
 
         if expand_time_dim:
             self.u_ew, self.d_ew = expand_time_dimension(self.u_ew, self.d_ew, T) # in (T, N, k), (T-1, N, k)
+        print('u_ew, d_ew shape', self.u_ew.size(), self.d_ew.size())
         
         self.rho = ADMM_info['rho']
         self.rho_u = ADMM_info['rho_u']
@@ -46,13 +50,43 @@ class ADMM_algorithm():
         self.CG_iter_zu = []
         self.CG_iter_zd = []
 
-        self.max_CG_iter = 1000
+        self.max_CG_iter = 100
         self.CG_tol = 1e-8
         self.ADMM_tol = 1e-6
-        self.max_ADMM_iter = 1000
+        self.max_ADMM_iter = 100
 
         self.t_in = t_in
         self.T = T
+
+        self.p_res_list = []
+        self.d_res_list = []
+        
+        self.res_name = ['zu']
+        if self.ablation in ['None', 'DGLR']:
+            self.res_name.append('phi')
+        if self.ablation != 'DGLR':
+            self.res_name.append('zd')
+    
+    def init_iterations(self, ablation):
+        self.ablation = ablation
+        self.alpha_x = []
+        self.beta_x = []
+        self.alpha_zu = []
+        self.beta_zu = []
+        self.alpha_zd = []
+        self.beta_zd = []
+        self.CG_iter_x = []
+        self.CG_iter_zu = []
+        self.CG_iter_zd = []
+        self.p_res_list = []
+        self.d_res_list = []
+        
+        self.res_name = ['zu']
+        if self.ablation in ['None', 'DGLR']:
+            self.res_name.append('phi')
+        if self.ablation != 'DGLR':
+            self.res_name.append('zd')
+
 
         
 
@@ -75,40 +109,46 @@ class ADMM_algorithm():
         pad_x = torch.cat((x, pad_x), 2)
         # gather features on each children
         child_features = self.d_ew.unsqueeze(0).unsqueeze(-1) * pad_x[:, :-1, self.connect_list.view(-1)].view(B, T-1, self.n_nodes, -1, n_channels)
-        x[:,1:] = x[:,1:] - child_features.sum(3)
+
+        y = x.clone()
+        y[:,1:] = x[:,1:] - child_features.sum(3)
         # time 0 has no children
-        x[:,0] = x[:,0] * 0
-        return x
+        y[:,0] = x[:,0] * 0
+        return y
     
     def apply_op_Ldr_T(self, x:torch.tensor):
         B ,T, n_channels = x.size(0), x.size(1), x.size(-1)
         if self.use_kNN:
             # assymetric graph constructions with kNN. Compute weighted features for each father, scatter-add to the childrens
 
-            holder = self.d_ew.unsqeeze(0).unsqueeze(-1) * x[:,1:].unsqueeze(3) # (B, T-1, N, k, n_channels)
-            father_features = torch.zeros((B, T-1, self.n_nodes+1, n_channels))
+            holder = self.d_ew.unsqueeze(0).unsqueeze(-1) * x[:,1:].unsqueeze(3) # (B, T-1, N, k, n_channels)
+            father_features = torch.zeros((B, T-1, self.n_nodes+1, n_channels), dtype=holder.dtype)
+            # print(holder.dtype, father_features.dtype)
             index = self.connect_list.reshape(-1)[None, None, :, None].repeat(B, T-1, 1, n_channels)
             index[index == -1] = self.n_nodes
             if torch.any(index < 0) or torch.any(index >= father_features.size(2)):
                 raise ValueError("Index out of bounds")
+            
             father_features = father_features.scatter_add(2, index, holder.view(B, T-1, -1, n_channels))
+            father_features = father_features[:,:,:-1]
         else:
             # the graph connect list is symmetric. Direct apply on the father nodes
             pad_x = torch.zeros_like(x[:,:,0:1])
             pad_x = torch.cat((x, pad_x), 2)
             father_features = self.d_ew.unsqueeze(0).unsqueeze(-1) * pad_x[:, 1:, self.connect_list.view(-1)].view(B, T-1, self.n_nodes, -1, n_channels)
+            father_features = father_features.sum(3)
 
         # the end nodes (in time T) have no children, y[:, -1] = x
         # the source nodes in time 0 have no fathers, y[:,0] = - father_features[:,0]
         # other nodes: y[:,t] = x[:,t] - father_features[:, t]
-        # y = x.clone()
-        x[:,0] = x[:,0] * 0
-        x[:,:-1] = x[:, :-1] - father_features.sum(3)
+        y = x.clone()
+        y[:,0] = x[:,0] * 0
+        y[:,:-1] = x[:, :-1] - father_features
         return y
     
     def apply_op_cLdr(self, x):
         y = self.apply_op_Ldr(x)
-        y = self.apply_op_Ldr_T(x)
+        y = self.apply_op_Ldr_T(y)
         return y
     
     def apply_op_Ln(self, x): # undirected graphs
@@ -146,14 +186,14 @@ class ADMM_algorithm():
             r_norm_sq = r_norm_new_sq
 
             if torch.sqrt(r_norm_sq).max() < self.CG_tol:
-                print(f'{k+1} CG iterations')
+                # print(f'{k+1} CG iterations converge')
                 return x, k + 1, torch.Tensor(alpha_list), torch.Tensor(beta_list) # iterations
             
-            print(f"CG iteration {k}: total max error {torch.sqrt(r_norm_sq).max():.4g}, alpha in ({alpha.min():.4g}, {alpha.max():.4g}), beta in ({beta.min():.4g}, {beta.max():.4g})")
+            # print(f"CG iteration {k}: total max error {torch.sqrt(r_norm_sq).max():.4g}, alpha in ({alpha.min():.4g}, {alpha.max():.4g}), beta in ({beta.min():.4g}, {beta.max():.4g})")
 
             p = r + beta[:, None, None, None] * p
-
-        return x, self.max_CG_iter, alpha_list, beta_list
+        # print(f'CG not converge, total max error {torch.sqrt(r_norm_sq).max():.4g}')
+        return x, -1, alpha_list, beta_list
 
 
     def LHS_x(self, x):
@@ -185,7 +225,7 @@ class ADMM_algorithm():
         u = torch.abs(s) - d
         return torch.sign(s) * u * (u > 0)        
 
-    def forward(self, y):
+    def combined_loop(self, y):
         '''
         Input:
             y in (B, t_in, N, C)
@@ -193,13 +233,14 @@ class ADMM_algorithm():
             x in (B, T, N, C)
         actually the ADMMBlock accepts x
         '''
+
         # TODO: primal guess of x
-        x = initial_guess(y, self.T)
+        x = initial_guess(y, self.t_in, self.T)
 
         assert not torch.isnan(self.d_ew).any(), 'Directed graph weights d_ew has NaN value'
         assert not torch.isnan(self.u_ew).any(), 'Undirected graph weights u_ew has NaN value'
         
-        gamma_u, gamma_d = torch.ones_like(x) * 0.05, torch.ones_like(x) * 0.1
+        gamma_u, gamma_d = torch.ones_like(x) * 0.1, torch.ones_like(x) * 0.1
 
         if self.ablation in ['None', 'DGLR']:
             gamma = torch.ones_like(x) * 0.1
@@ -263,19 +304,56 @@ class ADMM_algorithm():
             if self.ablation in ['None', 'DGLR']:
                 phi_old = phi
                 # print('executed phi update')
-                phi = self.phi_direct(x, gamma, i)
+                phi = self.phi_direct(x, gamma)
                 assert not torch.isnan(phi).any(), f"phi has NaN value in loop {i}"
                 gamma = gamma + self.rho * (phi - self.apply_op_Ldr(x))
                 assert not torch.isnan(gamma).any(), f'gamma has NaN {torch.isnan(gamma).any()}'
             # criterion
-            primal_residual = max(torch.norm(phi - self.apply_op_Ldr(x)), torch.norm(x - zu), torch.norm(x - zd))
-            dual_residual = max(torch.norm(-self.rho[i] * self.apply_op_Ldr_T(phi - phi_old)), torch.norm(-self.rho_u[i] * (zu - zu_old)), torch.norm(-self.rho_d[i] * (zd - zd_old)))
-            print(f'ADMM iters {i}: x_CG_iters {CG_iter_x}, zu_CG_iters {CG_iter_zu}, zd_CG_iters {CG_iter_zd}')
-            print(f'ADMM iters {i}: pri_err = {primal_residual}, dual_err = {dual_residual}')
-            if primal_residual < self.ADMM_tol and dual_residual < 1e-3:
-                break
 
+            primal_residual = []
+            dual_residual = []
+
+            # zu
+            primal_residual.append(torch.norm(x - zu).item())
+            dual_residual.append(torch.norm(-self.rho_u * (zu - zu_old)).item())
+
+            if self.ablation in ['None', 'DGLR']:
+                primal_residual.append(torch.norm(phi - self.apply_op_Ldr(x)).item())
+                dual_residual.append(torch.norm(-self.rho * self.apply_op_Ldr_T(phi - phi_old)).item())
+            
+            if self.ablation != 'DGLR':
+                primal_residual.append(torch.norm(x - zd).item())
+                dual_residual.append(torch.norm(-self.rho_d * (zd - zd_old)).item())
+            
+            # p_res, d_res = max(primal_residual), max(dual_residual)
+
+            print(f'ADMM iters {i}: x_CG_iters {CG_iter_x}, zu_CG_iters {CG_iter_zu}, zd_CG_iters {CG_iter_zd}, pri_err = [{", ".join([f"{err:.4g}" for err in primal_residual])}], dual_err = [{", ".join([f"{err:.4g}" for err in dual_residual])}]')
+            self.p_res_list.append(primal_residual)
+            self.d_res_list.append(dual_residual)
+            # print(f'ADMM iters {i}: pri_err = {p_res}, dual_err = {d_res}')
+            if max(primal_residual) < self.ADMM_tol and max(dual_residual) < self.ADMM_tol:
+                break
+        # self.plot_residual()
         return x
+    
+    def plot_residual(self, save_path=None):
+        iters = len(self.p_res_list)
+        p_res = torch.Tensor(self.p_res_list)
+        d_res = torch.Tensor(self.d_res_list)
+        res = torch.cat((p_res, d_res), 1)
+        legend = ['pri_' + s for s in self.res_name] + ['dual_'+ s for s in self.res_name]
+        plt.figure()
+        plt.plot(torch.arange(0, iters, 1), res)
+        plt.legend(legend)
+        plt.title('Residuals in ADMM algorithm')
+        plt.xlabel('ADMM iterations')
+        plt.yscale('log')
+        plt.show()
+        if save_path is not None:
+            plt.savefig(save_path)
+        plt.close()
+
+
 
 
 def initial_guess(y, t_in, T):
@@ -285,10 +363,10 @@ def initial_guess(y, t_in, T):
     use a simple linear regression to guess x
     '''
     t = torch.arange(0, t_in, 1).to(torch.float)
-    print(t.dtype)
+    # print(t.dtype)
     w = ((t[None,:,None,None] * y).mean(1) - t.mean() * y.mean(1)) / ((t ** 2).mean() - t.mean() ** 2)
     b = y.mean(1) - w * t.mean()
-    print(f'Linear regression: w {w.size()}, b {b.size()}')
+    # print(f'Linear regression: w {w.size()}, b {b.size()}')
 
     t1 = torch.arange(t_in, T, 1).to(torch.float)
     x_pred = w[:,None,:,:] * t1[None,:,None,None] + b[:,None,:,:]

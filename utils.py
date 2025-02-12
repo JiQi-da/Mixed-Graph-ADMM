@@ -44,6 +44,8 @@ class TrafficDataset():
         }
 
         self.data = torch.tensor(np.load(os.path.join(data_folder, data_file))['data'][...,:1]) # in (T, N, 1)
+
+        # TODO: normalize data
     
     def get_data(self, index):
         x = self.data[index:index + 24]
@@ -80,6 +82,8 @@ def connect_list(n_nodes, edges, dists):
     connect_list[:,0] = torch.arange(n_nodes)
     dist_list[:,0] = torch.zeros(n_nodes)
 
+    connect_list = connect_list.to(torch.long)
+
     return connect_list, dist_list # in (N, k)
 
 def k_nearest_neighbors(n_nodes, edges:torch.Tensor, dists:torch.Tensor, k):
@@ -105,7 +109,7 @@ def k_nearest_neighbors(n_nodes, edges:torch.Tensor, dists:torch.Tensor, k):
         nearest_dists[node,:k_true] = torch.tensor([j for (_,j) in closest_nodes])
     return nearest_nodes, nearest_dists
 
-def undirected_graph_from_distance(connect_list:torch.Tensor, dist_list:torch.Tensor, sigma=None, regularized=True):
+def undirected_graph_from_distance(connect_list:torch.Tensor, dist_list:torch.Tensor, u_sigma=None, regularized=True):
     '''
     connect_list: connection from each node to the other (include a self-loop in the 0th entry, pad -1 as placeholder)
 
@@ -119,13 +123,13 @@ def undirected_graph_from_distance(connect_list:torch.Tensor, dist_list:torch.Te
     The difference:(i,t) -> (i, t+1) in directed graph, but no self loop in directed graphs
     '''
     n_nodes = connect_list.shape[0]
-    if sigma == None:
-        dist_mask = (connect_list != -1) & (dist_list != 0)
-        dist_values = dist_list[dist_mask]
+    dist_mask = (connect_list != -1) & (dist_list != 0)
+    dist_values = dist_list[dist_mask]
+    if u_sigma == None:
         u_sigma = max(dist_values.max().item() / 50, dist_values.min().item() * 50)
-        print(f'sigma = {u_sigma}, nearest_dist in ({dist_values.min().item():.4f}, {dist_values.max().item():.4f})')
+    print(f'Undirected graph: sigma = {u_sigma}, nearest_dist in ({dist_values.min().item():.4f}, {dist_values.max().item():.4f})')
     
-    weights = torch.exp(- dist_list[:,1:] / sigma) # in (N, k + 1)
+    weights = torch.exp(- dist_list[:,1:] / u_sigma) # in (N, k)
     # mask where there's no connection
     zero_mask = (connect_list[:,1:] == -1)
     weights[zero_mask] = 0
@@ -139,16 +143,16 @@ def undirected_graph_from_distance(connect_list:torch.Tensor, dist_list:torch.Te
         weights = weights * inv_sqrt_degree_ij
     return weights
 
-def directed_graph_from_distance(connect_list:torch.Tensor, dist_list:torch.Tensor, sigma=None, regularized=True):
+def directed_graph_from_distance(connect_list:torch.Tensor, dist_list:torch.Tensor, d_sigma=None, regularized=True):
 
     n_nodes = connect_list.shape[0]
-    if sigma == None:
-        dist_mask = (connect_list != -1) & (dist_list != 0)
-        dist_values = dist_list[dist_mask]
-        u_sigma = max(dist_values.max().item() / 50, dist_values.min().item() * 50)
-        print(f'sigma = {u_sigma}, nearest_dist in ({dist_values.min().item():.4f}, {dist_values.max().item():.4f})')
+    dist_mask = (connect_list != -1) & (dist_list != 0)
+    dist_values = dist_list[dist_mask]
+    if d_sigma == None:
+        d_sigma = max(dist_values.max().item() / 50, dist_values.min().item() * 50)
+    print(f'Directed Graph: sigma = {d_sigma}, nearest_dist in ({dist_values.min().item():.4f}, {dist_values.max().item():.4f})')
     
-    weights = torch.exp(- dist_list / sigma) # in (N, k + 1)
+    weights = torch.exp(- dist_list / d_sigma) # in (N, k + 1)
     zero_mask = (connect_list == -1)
     weights[zero_mask] = 0
 
