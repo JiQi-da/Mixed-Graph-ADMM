@@ -60,6 +60,11 @@ class ADMM_algorithm():
 
         self.p_res_list = []
         self.d_res_list = []
+        self.x_shift_list = []
+        self.delta_x_per_step = []
+        self.DGTV_list = []
+        self.DGLR_list = []
+        self.GLR_list = []
         
         self.res_name = ['zu']
         if self.ablation in ['None', 'DGLR']:
@@ -80,12 +85,18 @@ class ADMM_algorithm():
         self.CG_iter_zd = []
         self.p_res_list = []
         self.d_res_list = []
+        self.x_shift_list = []
+        self.delta_x_per_step = []
         
         self.res_name = ['zu']
         if self.ablation in ['None', 'DGLR']:
             self.res_name.append('phi')
         if self.ablation != 'DGLR':
             self.res_name.append('zd')
+        
+        self.DGTV_list = []
+        self.DGLR_list = []
+        self.GLR_list = []
 
 
         
@@ -150,6 +161,23 @@ class ADMM_algorithm():
         y = self.apply_op_Ldr(x)
         y = self.apply_op_Ldr_T(y)
         return y
+    
+    def DGTV(self, x):
+        '''
+        x in (B, T, N, C)
+        return x cLdr x, mean of each batch
+        '''
+        return (x * self.apply_op_cLdr(x)).sum((1,2,3)).mean()
+    
+    def DGLR(self, x):
+        '''
+        Return: \Vert L^d_r x \Vert_1, mean of each batch
+        '''
+        torch.norm()
+        return self.apply_op_Ldr(x).norm(dim=[1,2,3], p=1).mean()
+    
+    def GLR(self, x):
+        return (x * self.apply_op_Lu(x)).sum((1,2,3)).mean()
     
     def apply_op_Ln(self, x): # undirected graphs
         pass
@@ -251,7 +279,9 @@ class ADMM_algorithm():
         
         for i in range(self.max_ADMM_iter):
             x_old = x.clone()
-            zu_old, zd_old = zu.clone(), zd.clone()
+            zu_old = zu.clone()
+            if self.ablation != 'DGLR':
+                zd_old = zd.clone()
             # phi_old = phi.clone()
             Hty = torch.zeros_like(x)
             Hty[:,0:y.size(1)] = y
@@ -272,7 +302,7 @@ class ADMM_algorithm():
             assert not torch.isnan(RHS_x).any(), f'RHS_x has NaN value in ADMM loop {i}: d_ew {torch.isnan(self.d_ew).any()}; (rho_u, rho_d) has NaN ({torch.isnan(self.rho_u).any()}, {torch.isnan(self.rho_d).any()}); (z_u, z_d) has NaN ({torch.isnan(zu).any()}, {torch.isnan(zd).any()}), (gamma_u, gamma_d) has NaN ({torch.isnan(gamma_u).any()}, {torch.isnan(gamma_d).any()})'
             
             # solve x with zu, zd, update x
-            x, CG_iter_x, alpha_x, beta_x = self.CG_solver(self.LHS_x, RHS_x, x)
+            x, CG_iter_x, alpha_x, beta_x = self.CG_solver(self.LHS_x, RHS_x, x_old)
             self.alpha_x.append(alpha_x)
             self.beta_x.append(beta_x)
             self.CG_iter_x.append(CG_iter_x)
@@ -281,7 +311,7 @@ class ADMM_algorithm():
 
             # solve zu, zd with x, update zu, zd
             RHS_zu = gamma_u / 2 + self.rho_u / 2 * x
-            zu, CG_iter_zu, alpha_zu, beta_zu = self.CG_solver(self.LHS_zu, RHS_zu, zu)
+            zu, CG_iter_zu, alpha_zu, beta_zu = self.CG_solver(self.LHS_zu, RHS_zu, zu_old)
             self.alpha_zu.append(alpha_zu)
             self.beta_zu.append(beta_zu)
             self.CG_iter_zu.append(CG_iter_zu)
@@ -289,7 +319,7 @@ class ADMM_algorithm():
             # print('RHS_zu, zu', torch.isnan(RHS_zu).any(), RHS_zu.max(), RHS_zu.min(), torch.isnan(zu).any(), zu.max(), zu.min())
             if self.ablation != 'DGLR':
                 RHS_zd = gamma_d / 2 + self.rho_d / 2 * x
-                zd, CG_iter_zd, alpha_zd, beta_zd = self.CG_solver(self.LHS_zd, RHS_zd, zd)
+                zd, CG_iter_zd, alpha_zd, beta_zd = self.CG_solver(self.LHS_zd, RHS_zd, zd_old)
                 self.alpha_zd.append(alpha_zd)
                 self.beta_zd.append(beta_zd)
                 self.CG_iter_zd.append(CG_iter_zd)
@@ -302,7 +332,7 @@ class ADMM_algorithm():
             # udpata phi
             # phi = self.Phi_PGD(phi, x, gamma, i) # 
             if self.ablation in ['None', 'DGLR']:
-                phi_old = phi
+                phi_old = phi.clone()
                 # print('executed phi update')
                 phi = self.phi_direct(x, gamma)
                 assert not torch.isnan(phi).any(), f"phi has NaN value in loop {i}"
@@ -313,17 +343,26 @@ class ADMM_algorithm():
             primal_residual = []
             dual_residual = []
 
+            self.x_shift_list.append(torch.norm(x - x_old).item())
+            # dx_per_t = (x - x_old).mean(0).norm(dim=[1,2])
+            self.delta_x_per_step.append((x - x_old).mean(0).norm(dim=[1,2])) # in (24)
             # zu
             primal_residual.append(torch.norm(x - zu).item())
-            dual_residual.append(torch.norm(-self.rho_u * (zu - zu_old)).item())
+            # dual_residual.append(torch.norm(-self.rho_u * (zu - zu_old)).item())
+            dual_residual.append(torch.norm(zu - zu_old).item())
+            self.GLR_list.append(self.GLR(x))
 
             if self.ablation in ['None', 'DGLR']:
                 primal_residual.append(torch.norm(phi - self.apply_op_Ldr(x)).item())
-                dual_residual.append(torch.norm(-self.rho * self.apply_op_Ldr_T(phi - phi_old)).item())
+                # dual_residual.append(torch.norm(-self.rho * self.apply_op_Ldr_T(phi - phi_old)).item())
+                dual_residual.append(torch.norm(phi - phi_old).item())
+                self.DGTV_list.append(self.DGTV(x))
             
             if self.ablation != 'DGLR':
                 primal_residual.append(torch.norm(x - zd).item())
-                dual_residual.append(torch.norm(-self.rho_d * (zd - zd_old)).item())
+                # dual_residual.append(torch.norm(-self.rho_d * (zd - zd_old)).item())
+                dual_residual.append(torch.norm(zd - zd_old).item())
+                self.DGLR_list.append(self.DGLR(x))
             
             # p_res, d_res = max(primal_residual), max(dual_residual)
 
@@ -340,14 +379,63 @@ class ADMM_algorithm():
         iters = len(self.p_res_list)
         p_res = torch.Tensor(self.p_res_list)
         d_res = torch.Tensor(self.d_res_list)
-        res = torch.cat((p_res, d_res), 1)
-        legend = ['pri_' + s for s in self.res_name] + ['dual_'+ s for s in self.res_name]
+        x_shift = torch.Tensor(self.x_shift_list)
+        res = torch.cat((p_res, d_res, x_shift), 1)
+        legend = ['pri_' + s for s in self.res_name] + ['dual_'+ s for s in self.res_name] + ['dual_x']
         plt.figure()
         plt.plot(torch.arange(0, iters, 1), res)
         plt.legend(legend)
         plt.title('Residuals in ADMM algorithm')
         plt.xlabel('ADMM iterations')
         plt.yscale('log')
+        plt.show()
+        if save_path is not None:
+            plt.savefig(save_path)
+        plt.close()
+
+    def plot_x_per_step(self, save_path=None, top_iters=None):
+        iters = len(self.delta_x_per_step)
+        dxps = torch.Tensor(self.delta_x_per_step) # in (L, 24)
+        if top_iters is None:
+            top_iters = self.T
+        legend = [f'delta_x_{i:2d}' for i in range(top_iters)]
+        plt.figure()
+        plt.plot(torch.arange(0, iters, 1), dxps)
+        plt.legend(legend)
+        plt.show()
+        if save_path is not None:
+            plt.savefig(save_path)
+        plt.close()
+
+
+    def plot_CG_params(self, save_path=None):
+        iters = len(self.p_res_list)
+        p_res = torch.Tensor(self.p_res_list)
+        d_res = torch.Tensor(self.d_res_list)
+        res = torch.cat((p_res, d_res), 1)
+        legend = ['alpha_' + s for s in self.res_name] + ['beta_'+ s for s in self.res_name]
+        plt.figure()
+        plt.plot(torch.arange(0, iters, 1), res)
+        plt.legend(legend)
+        plt.title('Residuals in ADMM algorithm')
+        plt.xlabel('ADMM iterations')
+        plt.yscale('log')
+        plt.show()
+        if save_path is not None:
+            plt.savefig(save_path)
+        plt.close()
+    
+    def plot_regularization_terms(self, save_path=None):
+        iters = len(self.GLR_list)
+        glr = torch.Tensor(self.GLR_list)
+        plt.figure()
+        plt.plot(torch.arange(0, iters, 1), glr, label='GLR')
+        if self.ablation != 'DGLR':
+            dglr = torch.Tensor(self.DGLR_list)
+            plt.plot(torch.arange(0, iters, 1), dglr, label='DGLR')
+        if self.ablation in ['DGLR', 'None']:
+            dgtv = torch.Tensor(self.DGTV_list)
+            plt.plot(torch.arange(0, iters, 1), dgtv, label='DGTV')
         plt.show()
         if save_path is not None:
             plt.savefig(save_path)
