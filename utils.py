@@ -47,10 +47,17 @@ class TrafficDataset():
 
         # TODO: normalize data
     
-    def get_data(self, index):
+    def get_predict_data(self, index):
         x = self.data[index:index + 24]
-        y = self.data[index + 24:index + 36]
+        y = self.data[index:index + 12]
         return x, y
+    
+    def get_interpolated_data(self, index, mask_rate=0.4):
+        x = self.data[index:index + 24]
+        mask = (torch.rand_like(x) >= mask_rate).float()
+        y = x * mask
+        y[mask == 0] = float('nan')
+        return x, y, mask
 
     def get_databatch(self, index, batch_size):
         X, Y = []
@@ -162,6 +169,18 @@ def directed_graph_from_distance(connect_list:torch.Tensor, dist_list:torch.Tens
         inv_in_degree = torch.where(in_degree > 0, 1 / in_degree, torch.zeros_like(in_degree))
         weights = weights * inv_in_degree.unsqueeze(1)
     return weights
+
+def line_graph(n_nodes):
+    '''
+    edges: (n_edges, 2)
+    dists: (n_edges)
+    Return: 
+    - connect_list in (n_nodes, k) where k = 1
+    - weights in (n_nodes, k) where k = 1
+    '''
+    connect_list = torch.arange(n_nodes).unsqueeze(1)
+    weights = torch.ones_like(connect_list).float()
+    return connect_list, weights
 
 def expand_time_dimension(u_ew, d_ew, T:int):
     return u_ew.unsqueeze(0).repeat(T, 1, 1), d_ew.unsqueeze(0).repeat(T - 1, 1, 1)

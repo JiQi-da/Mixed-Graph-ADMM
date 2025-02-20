@@ -11,7 +11,8 @@ class ADMM_algorithm():
     '''
     only with 1 head
     '''
-    def __init__(self, graph_info, ADMM_info, use_kNN=False, k=4, u_sigma=None, d_sigma=None, expand_time_dim=True, ablation='None', t_in=12, T=24):
+    def __init__(self, graph_info, ADMM_info, use_kNN=False, k=4, u_sigma=None, d_sigma=None, expand_time_dim=True, ablation='None', t_in=12, T=24, use_line_graph=False):
+        self.use_line_graph = use_line_graph
         self.n_nodes = graph_info['n_nodes']
         self.u_edges = graph_info['u_edges']
         self.u_dists = graph_info['u_dist']
@@ -27,8 +28,14 @@ class ADMM_algorithm():
         assert ablation in ['None', 'DGTV', 'DGLR', 'UT'], "ablation should be in [\'None\', \'DGTV\', \'DGLR\', \'UT\']"
         self.u_ew = undirected_graph_from_distance(self.connect_list, self.dist_list, u_sigma=u_sigma, regularized=True)
         if self.ablation != 'UT':
-            self.d_ew = directed_graph_from_distance(self.connect_list, self.dist_list, d_sigma=d_sigma, regularized=True)
-
+            if not self.use_line_graph:
+                self.d_ew = directed_graph_from_distance(self.connect_list, self.dist_list, d_sigma=d_sigma, regularized=True)
+            else:
+                self.d_ew = torch.ones((self.n_nodes, 1))
+                # self.d_connect_list, self.d_ew = line_graph(self.n_nodes)
+        else:
+            assert self.use_line_graph, 'UT ablation should use line graph'
+            self.d_ew = torch.ones((self.n_nodes, 1))
         if expand_time_dim:
             self.u_ew, self.d_ew = expand_time_dimension(self.u_ew, self.d_ew, T) # in (T, N, k), (T-1, N, k)
         print('u_ew, d_ew shape', self.u_ew.size(), self.d_ew.size())
@@ -72,7 +79,15 @@ class ADMM_algorithm():
         if self.ablation != 'DGLR':
             self.res_name.append('zd')
     
-    def init_iterations(self, ablation):
+    def init_iterations(self, ablation, use_line_graph=False):
+        # self.use_line_graph = use_line_graph
+        if use_line_graph:
+            self.use_line_graph = True
+            self.d_ew = torch.ones((self.n_nodes, 1))
+        else:
+            self.use_line_graph = False
+            self.d_ew = directed_graph_from_distance(self.connect_list, self.dist_list, d_sigma=None, regularized=True)
+
         self.ablation = ablation
         self.alpha_x = []
         self.beta_x = []
@@ -115,47 +130,59 @@ class ADMM_algorithm():
         return x - weights_features.sum(3)
     
     def apply_op_Ldr(self, x):
-        B, T, n_channels = x.size(0), x.size(1), x.size(-1)
-        pad_x = torch.zeros_like(x[:,:,0:1])
-        pad_x = torch.cat((x, pad_x), 2)
-        # gather features on each children
-        child_features = self.d_ew.unsqueeze(0).unsqueeze(-1) * pad_x[:, :-1, self.connect_list.view(-1)].view(B, T-1, self.n_nodes, -1, n_channels)
-
-        y = x.clone()
-        y[:,1:] = x[:,1:] - child_features.sum(3)
-        # time 0 has no children
-        y[:,0] = x[:,0] * 0
-        return y
-    
-    def apply_op_Ldr_T(self, x:torch.tensor):
-        B ,T, n_channels = x.size(0), x.size(1), x.size(-1)
-        if self.use_kNN:
-            # assymetric graph constructions with kNN. Compute weighted features for each father, scatter-add to the childrens
-
-            holder = self.d_ew.unsqueeze(0).unsqueeze(-1) * x[:,1:].unsqueeze(3) # (B, T-1, N, k, n_channels)
-            father_features = torch.zeros((B, T-1, self.n_nodes+1, n_channels), dtype=holder.dtype)
-            # print(holder.dtype, father_features.dtype)
-            index = self.connect_list.reshape(-1)[None, None, :, None].repeat(B, T-1, 1, n_channels)
-            index[index == -1] = self.n_nodes
-            if torch.any(index < 0) or torch.any(index >= father_features.size(2)):
-                raise ValueError("Index out of bounds")
-            
-            father_features = father_features.scatter_add(2, index, holder.view(B, T-1, -1, n_channels))
-            father_features = father_features[:,:,:-1]
+        if self.use_line_graph:
+            y = x.clone()
+            y[:,0] = x[:,0] * 0
+            y[:,1:] = x[:,1:] - x[:,:-1]
+            return y
         else:
-            # the graph connect list is symmetric. Direct apply on the father nodes
+            B, T, n_channels = x.size(0), x.size(1), x.size(-1)
             pad_x = torch.zeros_like(x[:,:,0:1])
             pad_x = torch.cat((x, pad_x), 2)
-            father_features = self.d_ew.unsqueeze(0).unsqueeze(-1) * pad_x[:, 1:, self.connect_list.view(-1)].view(B, T-1, self.n_nodes, -1, n_channels)
-            father_features = father_features.sum(3)
+            # gather features on each children
+            child_features = self.d_ew.unsqueeze(0).unsqueeze(-1) * pad_x[:, :-1, self.connect_list.view(-1)].view(B, T-1, self.n_nodes, -1, n_channels)
 
-        # the end nodes (in time T) have no children, y[:, -1] = x
-        # the source nodes in time 0 have no fathers, y[:,0] = - father_features[:,0]
-        # other nodes: y[:,t] = x[:,t] - father_features[:, t]
-        y = x.clone()
-        y[:,0] = x[:,0] * 0
-        y[:,:-1] = x[:, :-1] - father_features
-        return y
+            y = x.clone()
+            y[:,1:] = x[:,1:] - child_features.sum(3)
+            # time 0 has no children
+            y[:,0] = x[:,0] * 0
+            return y
+    
+    def apply_op_Ldr_T(self, x:torch.tensor):
+        if self.use_line_graph:
+            y = x.clone()
+            y[:,0] = x[:,0] * 0
+            y[:,:-1] = y[:,:-1] - x[:,1:]
+            return y
+        else:
+            B ,T, n_channels = x.size(0), x.size(1), x.size(-1)
+            if self.use_kNN:
+                # assymetric graph constructions with kNN. Compute weighted features for each father, scatter-add to the childrens
+
+                holder = self.d_ew.unsqueeze(0).unsqueeze(-1) * x[:,1:].unsqueeze(3) # (B, T-1, N, k, n_channels)
+                father_features = torch.zeros((B, T-1, self.n_nodes+1, n_channels), dtype=holder.dtype)
+                # print(holder.dtype, father_features.dtype)
+                index = self.connect_list.reshape(-1)[None, None, :, None].repeat(B, T-1, 1, n_channels)
+                index[index == -1] = self.n_nodes
+                if torch.any(index < 0) or torch.any(index >= father_features.size(2)):
+                    raise ValueError("Index out of bounds")
+                
+                father_features = father_features.scatter_add(2, index, holder.view(B, T-1, -1, n_channels))
+                father_features = father_features[:,:,:-1]
+            else:
+                # the graph connect list is symmetric. Direct apply on the father nodes
+                pad_x = torch.zeros_like(x[:,:,0:1])
+                pad_x = torch.cat((x, pad_x), 2)
+                father_features = self.d_ew.unsqueeze(0).unsqueeze(-1) * pad_x[:, 1:, self.connect_list.view(-1)].view(B, T-1, self.n_nodes, -1, n_channels)
+                father_features = father_features.sum(3)
+
+            # the end nodes (in time T) have no children, y[:, -1] = x
+            # the source nodes in time 0 have no fathers, y[:,0] = - father_features[:,0]
+            # other nodes: y[:,t] = x[:,t] - father_features[:, t]
+            y = x.clone()
+            y[:,0] = x[:,0] * 0
+            y[:,:-1] = x[:, :-1] - father_features
+            return y
     
     def apply_op_cLdr(self, x):
         y = self.apply_op_Ldr(x)
@@ -173,14 +200,51 @@ class ADMM_algorithm():
         '''
         Return: \Vert L^d_r x \Vert_1, mean of each batch
         '''
-        torch.norm()
+        # torch.norm()
         return self.apply_op_Ldr(x).norm(dim=[1,2,3], p=1).mean()
     
     def GLR(self, x):
         return (x * self.apply_op_Lu(x)).sum((1,2,3)).mean()
     
+    # in one equation, for both line graph and kNN graph
     def apply_op_Ln(self, x): # undirected graphs
-        pass
+        # for undirected graph, each node is to minus its neighboring features
+        # we don't use further regularization on undirected graphs
+        B, T, n_channels = x.size(0), x.size(1), x.size(-1)
+        pad_x = torch.zeros_like(x[:,:,0:1])
+        pad_x = torch.cat((x, pad_x), 2)
+        # father and children features
+        if self.use_line_graph:
+            father_features = x[:, :-1]
+            child_features = x[:, 1:]
+        else:
+            child_features = self.d_ew.unsqueeze(0).unsqueeze(-1) * pad_x[:, :-1, self.connect_list.view(-1)].view(B, T-1, self.n_nodes, -1, n_channels)
+            child_features = child_features.sum(3)
+            if self.use_kNN:
+                holder = self.d_ew.unsqueeze(0).unsqueeze(-1) * x[:,1:].unsqueeze(3) # (B, T-1, N, k, n_channels)
+                father_features = torch.zeros((B, T-1, self.n_nodes+1, n_channels), dtype=holder.dtype)
+                # print(holder.dtype, father_features.dtype)
+                index = self.connect_list.reshape(-1)[None, None, :, None].repeat(B, T-1, 1, n_channels)
+                index[index == -1] = self.n_nodes
+                if torch.any(index < 0) or torch.any(index >= father_features.size(2)):
+                    raise ValueError("Index out of bounds")
+                
+                father_features = father_features.scatter_add(2, index, holder.view(B, T-1, -1, n_channels))
+                father_features = father_features[:,:,:-1]
+            else:
+                father_features = self.d_ew.unsqueeze(0).unsqueeze(-1) * pad_x[:, 1:, self.connect_list.view(-1)].view(B, T-1, self.n_nodes, -1, n_channels)
+                father_features = father_features.sum(3)
+            
+        y[:,1:] = y[:,1:] - father_features
+        y[:,:-1] = y[:,:-1] - child_features
+            
+        # neighboring features (regularized)
+        weights_features = self.u_ew.unsqueeze(0).unsqueeze(-1) * pad_x[:,:,self.connect_list[:,1:].reshape(-1)].reshape(B, T, self.n_nodes, -1, n_channels)
+        weights_features = weights_features.sum(3)
+
+        return y - weights_features
+
+
     
     def CG_solver(self, LHS_func, RHS, x0=None): # TODO: if has no solution, compute least square solution
         '''
@@ -379,7 +443,8 @@ class ADMM_algorithm():
         iters = len(self.p_res_list)
         p_res = torch.Tensor(self.p_res_list)
         d_res = torch.Tensor(self.d_res_list)
-        x_shift = torch.Tensor(self.x_shift_list)
+        x_shift = torch.Tensor(self.x_shift_list).reshape(-1, 1)
+        print(p_res.shape, d_res.shape, x_shift.shape)
         res = torch.cat((p_res, d_res, x_shift), 1)
         legend = ['pri_' + s for s in self.res_name] + ['dual_'+ s for s in self.res_name] + ['dual_x']
         plt.figure()
@@ -460,6 +525,29 @@ def initial_guess(y, t_in, T):
     x_pred = w[:,None,:,:] * t1[None,:,None,None] + b[:,None,:,:]
     x = torch.cat((y, x_pred), 1)
     return x
+
+def initial_interpolation(y, mask):
+    '''
+    y in (B, T, N, C), y = x * mask
+    mask in (B, T, N, C), mask = 1 for observed values
+    find an initial interpolation method to recover x
+    '''
+    # regression on each node / batch, B * N * C in total
+    B, T, N, C = y.size()
+    t = torch.arange(0, T, 1).to(torch.float).unsqueeze(0).unsqueeze(2).unsqueeze(3).repeat(B, 1, N, C) # in (B, T, N, C)
+    n_data = mask.sum(1) # in (B, N, C)
+    t_mean = (t * mask).sum(1) / n_data
+    y_mean = (y * mask).sum(1) / n_data
+    ty_mean = (t * y * mask).sum(1) / n_data
+    t2_mean = (t ** 2 * mask).sum(1) / n_data
+    w = (ty_mean - t_mean * y_mean) / (t2_mean - t_mean ** 2)
+    b = y_mean - w * t_mean
+    x = w * t + b
+    # add to the missing values
+    x = x * (1 - mask) + y
+    assert not torch.isnan(x).any(), 'Initial interpolation x has NaN value'
+    return x
+    # w = (n_data * (t * y * mask).sum(1) - (t * mask).sum(1) * y.sum(1)) / (n_data * ((t * mask) ** 2).sum(1) - (t * mask).sum(1) ** 2)
 
 
 if __name__ == '__main__':
