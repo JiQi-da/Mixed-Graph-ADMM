@@ -5,6 +5,7 @@ import torch
 import os
 from utils import *
 import matplotlib.pyplot as plt
+import math
 
 
 class ADMM_algorithm():
@@ -206,17 +207,19 @@ class ADMM_algorithm():
     def GLR(self, x):
         return (x * self.apply_op_Lu(x)).sum((1,2,3)).mean()
     
-    # in one equation, for both line graph and kNN graph
-    def apply_op_Ln(self, x): # undirected graphs
-        # for undirected graph, each node is to minus its neighboring features
-        # we don't use further regularization on undirected graphs
+    def apply__op_Ln(self, x):
+        # change directed graph into undirected ones
         B, T, n_channels = x.size(0), x.size(1), x.size(-1)
         pad_x = torch.zeros_like(x[:,:,0:1])
         pad_x = torch.cat((x, pad_x), 2)
-        # father and children features
+        y = x.clone()
         if self.use_line_graph:
             father_features = x[:, :-1]
             child_features = x[:, 1:]
+            # regularized
+            y[:,1:] = y[:,1:] - father_features / math.sqrt(2)
+            y[:,:-1] = y[:,:-1] - child_features / math.sqrt(2)
+            return y
         else:
             child_features = self.d_ew.unsqueeze(0).unsqueeze(-1) * pad_x[:, :-1, self.connect_list.view(-1)].view(B, T-1, self.n_nodes, -1, n_channels)
             child_features = child_features.sum(3)
@@ -234,15 +237,44 @@ class ADMM_algorithm():
             else:
                 father_features = self.d_ew.unsqueeze(0).unsqueeze(-1) * pad_x[:, 1:, self.connect_list.view(-1)].view(B, T-1, self.n_nodes, -1, n_channels)
                 father_features = father_features.sum(3)
+    
+    # # in one equation, for both line graph and kNN graph
+    # def apply_op_Ln(self, x): # undirected graphs
+    #     # for undirected graph, each node is to minus its neighboring features
+    #     # we don't use further regularization on undirected graphs
+    #     B, T, n_channels = x.size(0), x.size(1), x.size(-1)
+    #     pad_x = torch.zeros_like(x[:,:,0:1])
+    #     pad_x = torch.cat((x, pad_x), 2)
+    #     # father and children features
+    #     if self.use_line_graph:
+    #         father_features = x[:, :-1]
+    #         child_features = x[:, 1:]
+    #     else:
+    #         child_features = self.d_ew.unsqueeze(0).unsqueeze(-1) * pad_x[:, :-1, self.connect_list.view(-1)].view(B, T-1, self.n_nodes, -1, n_channels)
+    #         child_features = child_features.sum(3)
+    #         if self.use_kNN:
+    #             holder = self.d_ew.unsqueeze(0).unsqueeze(-1) * x[:,1:].unsqueeze(3) # (B, T-1, N, k, n_channels)
+    #             father_features = torch.zeros((B, T-1, self.n_nodes+1, n_channels), dtype=holder.dtype)
+    #             # print(holder.dtype, father_features.dtype)
+    #             index = self.connect_list.reshape(-1)[None, None, :, None].repeat(B, T-1, 1, n_channels)
+    #             index[index == -1] = self.n_nodes
+    #             if torch.any(index < 0) or torch.any(index >= father_features.size(2)):
+    #                 raise ValueError("Index out of bounds")
+                
+    #             father_features = father_features.scatter_add(2, index, holder.view(B, T-1, -1, n_channels))
+    #             father_features = father_features[:,:,:-1]
+    #         else:
+    #             father_features = self.d_ew.unsqueeze(0).unsqueeze(-1) * pad_x[:, 1:, self.connect_list.view(-1)].view(B, T-1, self.n_nodes, -1, n_channels)
+    #             father_features = father_features.sum(3)
             
-        y[:,1:] = y[:,1:] - father_features
-        y[:,:-1] = y[:,:-1] - child_features
+    #     y[:,1:] = y[:,1:] - father_features
+    #     y[:,:-1] = y[:,:-1] - child_features
             
-        # neighboring features (regularized)
-        weights_features = self.u_ew.unsqueeze(0).unsqueeze(-1) * pad_x[:,:,self.connect_list[:,1:].reshape(-1)].reshape(B, T, self.n_nodes, -1, n_channels)
-        weights_features = weights_features.sum(3)
+    #     # neighboring features (regularized)
+    #     weights_features = self.u_ew.unsqueeze(0).unsqueeze(-1) * pad_x[:,:,self.connect_list[:,1:].reshape(-1)].reshape(B, T, self.n_nodes, -1, n_channels)
+    #     weights_features = weights_features.sum(3)
 
-        return y - weights_features
+    #     return y - weights_features
 
 
     
