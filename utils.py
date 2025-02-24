@@ -67,6 +67,18 @@ class TrafficDataset():
             Y.append(y)
         return torch.tensor(X), torch.tensor(Y)
 
+def get_data_difference(data:torch.Tensor):
+    '''
+    data: (B, T, N, 1)
+    Return: (B, T, N, 1)
+    '''
+    assert data.ndim == 4, "Data should have 4 dims (B, T, N, C)"
+    y = data.clone()
+    y[:,1:] = data[:,1:] - data[:,:-1]
+    y[0] = 0
+    return y
+
+
 def connect_list(n_nodes, edges, dists):
     '''
     return (N, k) where k is the maximum degree
@@ -169,6 +181,28 @@ def directed_graph_from_distance(connect_list:torch.Tensor, dist_list:torch.Tens
         inv_in_degree = torch.where(in_degree > 0, 1 / in_degree, torch.zeros_like(in_degree))
         weights = weights * inv_in_degree.unsqueeze(1)
     return weights
+
+def recover_Laplacians(connect_list, weights):
+    '''
+    For undirected graphs only, on each time slice
+    connect_list: (N, k)
+    weights: (N, k)
+    Return:
+    - L: (N, N)
+    '''
+    n_nodes = connect_list.shape[0]
+    L = torch.zeros((n_nodes, n_nodes))
+    for i in range(n_nodes):
+        L[i, i] = weights[i].sum()
+        for j in connect_list[i]:
+            if j != -1:
+                L[i, j] = - weights[i, j]
+    # compute condition numbers
+    eigvals = torch.symeig(L, eigenvectors=False).eigenvalues
+    cond = eigvals.max() / eigvals.min()
+    print(f'Condition number: {cond:.4f}')
+    return L, cond
+
 
 def line_graph(n_nodes):
     '''

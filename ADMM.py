@@ -213,16 +213,18 @@ class ADMM_algorithm():
         pad_x = torch.zeros_like(x[:,:,0:1])
         pad_x = torch.cat((x, pad_x), 2)
         y = x.clone()
-        if self.use_line_graph:
+        if self.use_line_graph: # line graph, very simple
             father_features = x[:, :-1]
             child_features = x[:, 1:]
             # regularized
-            y[:,1:] = y[:,1:] - father_features / math.sqrt(2)
-            y[:,:-1] = y[:,:-1] - child_features / math.sqrt(2)
+            y[:,1:] = x[:,1:] - father_features / math.sqrt(2)
+            y[:,:-1] = x[:,:-1] - child_features / math.sqrt(2)
             return y
         else:
             child_features = self.d_ew.unsqueeze(0).unsqueeze(-1) * pad_x[:, :-1, self.connect_list.view(-1)].view(B, T-1, self.n_nodes, -1, n_channels)
-            child_features = child_features.sum(3)
+            child_features = child_features.sum(3) # in (B, T-1, N, C)
+            child_self_features = self.d_ew.unsqueeze(0).unsqueeze(-1) * x[:, 1:, :, None, :] # in (B, T-1, N, k, C)
+            child_self_features = child_self_features.sum(3) - child_features # in (B, T-1, N, C)
             if self.use_kNN:
                 holder = self.d_ew.unsqueeze(0).unsqueeze(-1) * x[:,1:].unsqueeze(3) # (B, T-1, N, k, n_channels)
                 father_features = torch.zeros((B, T-1, self.n_nodes+1, n_channels), dtype=holder.dtype)
@@ -237,7 +239,15 @@ class ADMM_algorithm():
             else:
                 father_features = self.d_ew.unsqueeze(0).unsqueeze(-1) * pad_x[:, 1:, self.connect_list.view(-1)].view(B, T-1, self.n_nodes, -1, n_channels)
                 father_features = father_features.sum(3)
-    
+
+                # not regularized, compute self features with weights
+            father_self_features = self.d_ew.unsqueeze(0).unsqueeze(-1) * x[:, :-1, :, None, :] # in (B, T-1, N, k, C)
+            father_self_features = father_self_features.sum(3) - father_features # in (B, T-1, N, C)
+
+            y = torch.zeros_like(y)
+            y[:,1:] = y[:,1:] + child_self_features
+            y[:,:-1] = y[:,:-1] + father_self_features
+            return y
     # # in one equation, for both line graph and kNN graph
     # def apply_op_Ln(self, x): # undirected graphs
     #     # for undirected graph, each node is to minus its neighboring features
@@ -331,14 +341,21 @@ class ADMM_algorithm():
         elif self.ablation == 'DGLR':
             output = HtHx + self.rho / 2 * self.apply_op_cLdr(x) + self.rho_u / 2 * x
         else: # 'UT'
-            output = None # TODO: add undirected version
+            output = HtHx + (self.rho_u + self.rho_d) / 2 * x
+            # output = None # TODO: add undirected version
         return output
 
     def LHS_zu(self, zu):
         return self.mu_u * self.apply_op_Lu(zu) + self.rho_u / 2 * zu
     
     def LHS_zd(self, zd):
-        return self.mu_d2 * self.apply_op_cLdr(zd) + self.rho_d / 2 * zd
+        if self.ablation != 'DGLR':
+            return self.mu_d2 * self.apply_op_cLdr(zd) + self.rho_d / 2 * zd
+        elif self.ablation == 'UT':
+            return self.mu_d2 * self.apply_op_Ln(zd) + self.rho_d / 2 * zd
+        else:
+            print('Error: LHS_zd')
+            return None
     
     def phi_direct(self, x, gamma):
         '''
@@ -349,7 +366,7 @@ class ADMM_algorithm():
         u = torch.abs(s) - d
         return torch.sign(s) * u * (u > 0)        
 
-    def combined_loop(self, y):
+    def combined_loop(self, y, mask=None, differential=False):
         '''
         Input:
             y in (B, t_in, N, C)
@@ -359,7 +376,14 @@ class ADMM_algorithm():
         '''
 
         # TODO: primal guess of x
-        x = initial_guess(y, self.t_in, self.T)
+        if differential:
+            y = get_data_difference(y)
+            
+        if mask is None:
+            x = initial_guess(y, self.t_in, self.T)
+        else:
+            # interpolation
+            x = initial_interpolation(y, mask)
 
         assert not torch.isnan(self.d_ew).any(), 'Directed graph weights d_ew has NaN value'
         assert not torch.isnan(self.u_ew).any(), 'Undirected graph weights u_ew has NaN value'
@@ -389,7 +413,7 @@ class ADMM_algorithm():
                 RHS_x = self.apply_op_Ldr_T(gamma + self.rho * phi) / 2 + (self.rho_u * zu + self.rho_d * zd) / 2 - (gamma_u + gamma_d) / 2 + Hty
                 assert not torch.isnan(gamma + self.rho * phi).any(), f'NaN exists in ADMM loop {i}: gamma {torch.isnan(gamma).any()}, rho {torch.isnan(self.rho).any()}, phi {torch.isnan(phi).any()}'
             elif self.ablation == 'UT':
-                pass
+                RHS_x = (self.rho_u * zu + self.rho_d * zd) / 2 - (gamma_u + gamma_d) / 2 + Hty
             elif self.ablation == 'DGLR':
                 RHS_x = self.apply_op_Ldr_T(gamma + self.rho * phi) / 2 + self.rho_u * zu / 2 - gamma_u / 2 + Hty
             # print(torch.isnan(zu).any(), torch.isnan(zd).any())
