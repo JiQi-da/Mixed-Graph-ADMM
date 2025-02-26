@@ -288,7 +288,7 @@ class ADMM_algorithm():
 
 
     
-    def CG_solver(self, LHS_func, RHS, x0=None): # TODO: if has no solution, compute least square solution
+    def CG_solver(self, LHS_func, RHS, x0=None, **kwargs): # TODO: if has no solution, compute least square solution
         '''
         Solving linear systems LHS_func(x) = RHS, B samples at the same time
         Input:
@@ -303,7 +303,7 @@ class ADMM_algorithm():
         else:
             x = x0.clone()
         
-        r = RHS - LHS_func(x)
+        r = RHS - LHS_func(x, **kwargs)
         p = r.clone() # in (B, T, N, C)
 
         r_norm_sq = (r * r).sum((1,2,3)) # in (B,)
@@ -330,9 +330,12 @@ class ADMM_algorithm():
         return x, -1, alpha_list, beta_list
 
 
-    def LHS_x(self, x):
+    def LHS_x(self, x, mask=None):
         HtHx = x.clone()
-        HtHx[:,self.t_in:] = HtHx[:,self.t_in:] * 0
+        if mask is None:
+            HtHx[:,self.t_in:] = HtHx[:,self.t_in:] * 0
+        else:
+            HtHx = x * mask
 
         if self.ablation == 'None':
             output = HtHx + (self.rho_u + self.rho_d) / 2 * x + self.rho / 2 * self.apply_op_cLdr(x)
@@ -426,7 +429,7 @@ class ADMM_algorithm():
             assert not torch.isnan(RHS_x).any(), f'RHS_x has NaN value in ADMM loop {i}: d_ew {torch.isnan(self.d_ew).any()}; (rho_u, rho_d) has NaN ({torch.isnan(self.rho_u).any()}, {torch.isnan(self.rho_d).any()}); (z_u, z_d) has NaN ({torch.isnan(zu).any()}, {torch.isnan(zd).any()}), (gamma_u, gamma_d) has NaN ({torch.isnan(gamma_u).any()}, {torch.isnan(gamma_d).any()})'
             
             # solve x with zu, zd, update x
-            x, CG_iter_x, alpha_x, beta_x = self.CG_solver(self.LHS_x, RHS_x, x_old)
+            x, CG_iter_x, alpha_x, beta_x = self.CG_solver(self.LHS_x, RHS_x, x_old, mask=mask)
             self.alpha_x.append(alpha_x)
             self.beta_x.append(beta_x)
             self.CG_iter_x.append(CG_iter_x)
