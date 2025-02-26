@@ -54,9 +54,12 @@ class TrafficDataset():
     
     def get_interpolated_data(self, index, mask_rate=0.4):
         x = self.data[index:index + 24]
+        torch.manual_seed(42)
         mask = (torch.rand_like(x) >= mask_rate).float()
         y = x * mask
-        y[mask == 0] = float('nan')
+        # y[mask == 0] = float('nan')
+        # print(f'Mask rate: {mask_rate}')
+        assert not torch.isnan(y[mask == 1]).any(), "Masked data should not be nan"
         return x, y, mask
 
     def get_databatch(self, index, batch_size):
@@ -73,9 +76,9 @@ def get_data_difference(data:torch.Tensor):
     Return: (B, T, N, 1)
     '''
     assert data.ndim == 4, "Data should have 4 dims (B, T, N, C)"
-    y = data.clone()
-    y[:,1:] = data[:,1:] - data[:,:-1]
-    y[0] = 0
+    # y = data.clone()
+    y = data[:,1:] - data[:,:-1]
+    # y[0] = 0
     return y
 
 
@@ -87,6 +90,7 @@ def connect_list(n_nodes, edges, dists):
     for edge in edges:
         counts[edge[0]] += 1
     k = counts.max().item()
+    print(counts)
     print('max degrees', k)
 
     connect_list = -torch.ones((n_nodes, k + 1), dtype=torch.int)

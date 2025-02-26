@@ -28,15 +28,15 @@ class ADMM_algorithm():
         self.ablation = ablation
         assert ablation in ['None', 'DGTV', 'DGLR', 'UT'], "ablation should be in [\'None\', \'DGTV\', \'DGLR\', \'UT\']"
         self.u_ew = undirected_graph_from_distance(self.connect_list, self.dist_list, u_sigma=u_sigma, regularized=True)
-        if self.ablation != 'UT':
-            if not self.use_line_graph:
-                self.d_ew = directed_graph_from_distance(self.connect_list, self.dist_list, d_sigma=d_sigma, regularized=True)
-            else:
-                self.d_ew = torch.ones((self.n_nodes, 1))
-                # self.d_connect_list, self.d_ew = line_graph(self.n_nodes)
+        # if self.ablation != 'UT':
+        if not self.use_line_graph:
+            self.d_ew = directed_graph_from_distance(self.connect_list, self.dist_list, d_sigma=d_sigma, regularized=True)
         else:
-            assert self.use_line_graph, 'UT ablation should use line graph'
             self.d_ew = torch.ones((self.n_nodes, 1))
+                # self.d_connect_list, self.d_ew = line_graph(self.n_nodes)
+        # else:
+        #     assert self.use_line_graph, 'UT ablation should use line graph'
+        #     self.d_ew = torch.ones((self.n_nodes, 1))
         if expand_time_dim:
             self.u_ew, self.d_ew = expand_time_dimension(self.u_ew, self.d_ew, T) # in (T, N, k), (T-1, N, k)
         print('u_ew, d_ew shape', self.u_ew.size(), self.d_ew.size())
@@ -207,7 +207,7 @@ class ADMM_algorithm():
     def GLR(self, x):
         return (x * self.apply_op_Lu(x)).sum((1,2,3)).mean()
     
-    def apply__op_Ln(self, x):
+    def apply_op_Ln(self, x):
         # change directed graph into undirected ones
         B, T, n_channels = x.size(0), x.size(1), x.size(-1)
         pad_x = torch.zeros_like(x[:,:,0:1])
@@ -377,7 +377,11 @@ class ADMM_algorithm():
 
         # TODO: primal guess of x
         if differential:
-            y = get_data_difference(y)
+            assert mask is None, 'differential mode does not support mask'
+            diff_y = get_data_difference(y)
+            x = initial_guess(diff_y, self.t_in - 1, self.T - 1)
+            x = torch.cat((torch.zeros_like(y[:,0:1]), x), 1)
+            x = torch.cumsum(x, dim=1)
             
         if mask is None:
             x = initial_guess(y, self.t_in, self.T)
@@ -398,10 +402,10 @@ class ADMM_algorithm():
         zu, zd = x.clone(), x.clone()
         
         for i in range(self.max_ADMM_iter):
-            x_old = x.clone()
-            zu_old = zu.clone()
+            x_old = x# .clone()
+            zu_old = zu# .clone()
             if self.ablation != 'DGLR':
-                zd_old = zd.clone()
+                zd_old = zd# .clone()
             # phi_old = phi.clone()
             Hty = torch.zeros_like(x)
             Hty[:,0:y.size(1)] = y
@@ -495,7 +499,7 @@ class ADMM_algorithm():
         # self.plot_residual()
         return x
     
-    def plot_residual(self, save_path=None):
+    def plot_residual(self, descriptions=None, save_path=None, log_y=False):
         iters = len(self.p_res_list)
         p_res = torch.Tensor(self.p_res_list)
         d_res = torch.Tensor(self.d_res_list)
@@ -506,30 +510,43 @@ class ADMM_algorithm():
         plt.figure()
         plt.plot(torch.arange(0, iters, 1), res)
         plt.legend(legend)
-        plt.title('Residuals in ADMM algorithm')
+        if descriptions is not None:
+            plt.title(f'Residuals in ADMM ({descriptions})')
+        else:
+            plt.title('Residuals in ADMM')
         plt.xlabel('ADMM iterations')
-        plt.yscale('log')
+        if log_y:
+            plt.yscale('log')
         plt.show()
         if save_path is not None:
             plt.savefig(save_path)
         plt.close()
 
-    def plot_x_per_step(self, save_path=None, top_iters=None):
+    def plot_x_per_step(self, save_path=None, show_list=None, start_iters=0, descriptions=None, log_y=False):
+        # print(self.delta_x_per_step)
         iters = len(self.delta_x_per_step)
-        dxps = torch.Tensor(self.delta_x_per_step) # in (L, 24)
-        if top_iters is None:
-            top_iters = self.T
-        legend = [f'delta_x_{i:2d}' for i in range(top_iters)]
+        dxps = torch.tensor([item.cpu().detach().numpy() for item in self.delta_x_per_step]) # in (L, 24)
+        if show_list is None:
+            show_list = list(range(self.T))
+        # legend = [f'dual_x_{i:2d}' for i in show_list]
         plt.figure()
-        plt.plot(torch.arange(0, iters, 1), dxps)
-        plt.legend(legend)
+        if log_y:
+            plt.yscale('log')
+        plt.plot(torch.arange(start_iters, iters, 1), dxps[start_iters:,show_list])
+        for j in show_list:
+            plt.annotate('dual_x_%d' % j, (iters-1, dxps[-1, j]), textcoords="offset points", xytext=(0,5), ha='center')
+        # plt.legend(legend)
+        if descriptions is not None:
+            plt.title(f'Dual_x for each time step ({descriptions})')
+        else:
+            plt.title('Dual_x for each time step')
         plt.show()
         if save_path is not None:
             plt.savefig(save_path)
         plt.close()
 
 
-    def plot_CG_params(self, save_path=None):
+    def plot_CG_params(self, descriptions=None, save_path=None):
         iters = len(self.p_res_list)
         p_res = torch.Tensor(self.p_res_list)
         d_res = torch.Tensor(self.d_res_list)
@@ -538,7 +555,10 @@ class ADMM_algorithm():
         plt.figure()
         plt.plot(torch.arange(0, iters, 1), res)
         plt.legend(legend)
-        plt.title('Residuals in ADMM algorithm')
+        if descriptions is not None:
+            plt.title(f'CGD params in ADMM ({descriptions})')
+        else:
+            plt.title('CGD params in ADMM')
         plt.xlabel('ADMM iterations')
         plt.yscale('log')
         plt.show()
@@ -598,9 +618,17 @@ def initial_interpolation(y, mask):
     t2_mean = (t ** 2 * mask).sum(1) / n_data
     w = (ty_mean - t_mean * y_mean) / (t2_mean - t_mean ** 2)
     b = y_mean - w * t_mean
+    print(f'Linear regression: w {w.size()}, b {b.size()}')
+    assert not torch.isnan(w).any(), 'Initial interpolation w has NaN value'
+    assert not torch.isnan(b).any(), 'Initial interpolation b has NaN value'
     x = w * t + b
+    assert not torch.isnan(x).any(), 'Initial interpolation x has NaN value'
     # add to the missing values
+    # mask == 0 is unknown, mask == 1 is known
+    # x = x * mask + y
     x = x * (1 - mask) + y
+    # print(y[mask == 0].sum())
+    # y[mask == 0] = x[mask == 0]
     assert not torch.isnan(x).any(), 'Initial interpolation x has NaN value'
     return x
     # w = (n_data * (t * y * mask).sum(1) - (t * mask).sum(1) * y.sum(1)) / (n_data * ((t * mask) ** 2).sum(1) - (t * mask).sum(1) ** 2)
