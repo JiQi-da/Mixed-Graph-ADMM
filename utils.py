@@ -6,6 +6,36 @@ import heapq
 import torch
 import numpy as np
 
+
+def scalar_disparity(data:torch.Tensor, scale_metric='std'):
+    '''
+    data: (T, N, C)
+    Return: disparity rate: coefficent variation, variance, range
+    '''
+    data_2d = data.squeeze(-1)
+    if scale_metric == 'std':
+        scales = torch.std(data_2d, dim=0)
+    elif scale_metric == 'range':
+        scales = torch.max(data_2d, dim=0)[0] - torch.min(data_2d, dim=0)[0]
+    elif scale_metric == 'iqr':
+        q75 = torch.quantile(data_2d, 0.75, dim=0)
+        q25 = torch.quantile(data_2d, 0.25, dim=0)
+        scales = q75 - q25
+    else:
+        raise ValueError('Invalid scale metric')
+    
+    # Coefficient Variation
+    mean_scale = torch.mean(scales)
+    if torch.isclose(mean_scale, torch.tensor(0.0, dtype=mean_scale.dtype)):
+        return float('nan')
+    cv = torch.std(scales) / mean_scale
+    var = torch.var(scales)
+    ptp = torch.max(scales) - torch.min(scales)
+    return cv.item(), var.item(), ptp.item()
+
+
+
+
 def physical_graph(df, sensor_dict=None):
     if sensor_dict is None:
         from_list, to_list = list(df['from'].values), list(df['to'].values)
@@ -22,7 +52,7 @@ def physical_graph(df, sensor_dict=None):
     return n_edges, u_edges, u_distance
 
 class TrafficDataset():
-    def __init__(self, data_folder, data_file, graph_csv, id_file=None):
+    def __init__(self, data_folder, data_file, graph_csv, id_file=None, transform=None):
         graph_path = os.path.join(data_folder, graph_csv)
         self.df = pd.read_csv(graph_path, index_col=None)
         if id_file is not None:
@@ -40,12 +70,53 @@ class TrafficDataset():
             'n_nodes': n_nodes,
             'n_edges': n_edges,
             'u_edges': u_edges,
-            'u_dist': u_distance
+            'u_dist': u_distance 
         }
 
         self.data = torch.tensor(np.load(os.path.join(data_folder, data_file))['data'][...,:1]) # in (T, N, 1)
-
+        cv, var, ptp = scalar_disparity(self.data, scale_metric='std')
+        print(f'[Metric=std] Disparity of each station: CV: {cv:.4f}, Var: {var:.4f}, PtP: {ptp:.4f}')
+        cv, var, ptp = scalar_disparity(self.data, scale_metric='iqr')
+        print(f'[Metric=iqr] Disparity of each station: CV: {cv:.4f}, Var: {var:.4f}, PtP: {ptp:.4f}')
         # TODO: normalize data
+        self.transform = transform
+        if self.transform == 'standardize': 
+            self.data_mean = self.data.mean(0, keepdim=True)
+            self.data_std = self.data.std(0, keepdim=True)
+            self.data = (self.data - self.data_mean) / self.data_std
+        elif self.transform == 'normalize':
+            self.data_max = self.data.max(0, keepdim=True)[0]
+            self.data_min = self.data.min(0, keepdim=True)[0]
+            self.data = (self.data - self.data_min) / (self.data_max - self.data_min)
+        # else:
+        #     self.data = self.data
+        # self.transform_data()
+
+            # self.data = (self.data - self.data.mean(0, keepdims=True)) / self.data.std(0, keepdims=True)
+        # self.data = self.data.permute(1,0,2)
+        # self.n_nodes = n_nodes
+    # def transform_data(self):
+    #     if self.transform == 'standardize': 
+    #         self.data_mean = self.data.mean(0, keepdims=True)
+    #         self.data_std = self.data.std(0, keepdims=True)
+    #         self.data = (self.data - self.data_mean) / self.data_std
+    #     elif self.transform == 'normalize':
+    #         self.data_max = self.data.max(0, keepdims=True)
+    #         self.data_min = self.data.min(0, keepdims=True)
+    #         self.data = (self.data - self.data_min) / (self.data_max - self.data_min)
+    #     else:
+    #         self.data = self.data
+    
+    def recover_data(self, data):
+        # assert self.normalized, "Data should be normalized"
+        if self.transform == 'standardize':
+            return data * self.data_std + self.data_mean
+        elif self.transform == 'normalize':
+            return data * (self.data_max - self.data_min) + self.data_min
+        else:
+            return data
+        # return data * self.data_std + self.data_mean
+
     
     def get_predict_data(self, index):
         x = self.data[index:index + 24]
