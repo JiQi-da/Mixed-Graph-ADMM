@@ -33,7 +33,7 @@ class ADMM_algorithm():
         if not self.use_line_graph:
             self.d_ew = directed_graph_from_distance(self.connect_list, self.dist_list, d_sigma=d_sigma, regularized=True)
         else:
-            self.d_ew = torch.ones((self.n_nodes, self.skip_connection))
+            self.d_ew = torch.ones((self.n_nodes, self.T, self.skip_connection))
             if self.skip_connection > 1:
                 self.d_ew = torch.tril(self.d_ew, diagonal=-1)
                 self.d_ew[0,0] = 1
@@ -42,8 +42,8 @@ class ADMM_algorithm():
                 self.d_ew[0,0] = 0
 
                 # connection list
-                self.time_list = torch.zeros((self.n_nodes, self.skip_connection))
-                offsets = torch.arange(1, self.skip_connection)
+                self.time_list = torch.zeros((self.T, self.skip_connection))
+                offsets = torch.arange(1, self.T)
                 for offset in offsets:
                     self.time_list.diagonal(-offset).fill_(offset - 1)
                 # Create an upper triangular matrix of ones with zero diagonal
