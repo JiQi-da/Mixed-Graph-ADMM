@@ -12,8 +12,9 @@ class ADMM_algorithm():
     '''
     only with 1 head
     '''
-    def __init__(self, graph_info, ADMM_info, use_kNN=False, k=4, u_sigma=None, d_sigma=None, expand_time_dim=True, ablation='None', t_in=12, T=24, use_line_graph=False):
+    def __init__(self, graph_info, ADMM_info, use_kNN=False, k=4, u_sigma=None, d_sigma=None, expand_time_dim=True, ablation='None', t_in=12, T=24, use_line_graph=False, skip_connection=1):
         self.use_line_graph = use_line_graph
+        self.skip_connection = skip_connection
         self.n_nodes = graph_info['n_nodes']
         self.u_edges = graph_info['u_edges']
         self.u_dists = graph_info['u_dist']
@@ -32,11 +33,22 @@ class ADMM_algorithm():
         if not self.use_line_graph:
             self.d_ew = directed_graph_from_distance(self.connect_list, self.dist_list, d_sigma=d_sigma, regularized=True)
         else:
-            self.d_ew = torch.ones((self.n_nodes, 1))
-                # self.d_connect_list, self.d_ew = line_graph(self.n_nodes)
-        # else:
-        #     assert self.use_line_graph, 'UT ablation should use line graph'
-        #     self.d_ew = torch.ones((self.n_nodes, 1))
+            self.d_ew = torch.ones((self.n_nodes, self.skip_connection))
+            if self.skip_connection > 1:
+                self.d_ew = torch.tril(self.d_ew, diagonal=-1)
+                self.d_ew[0,0] = 1
+                self.degree = self.d_ew.sum(1)
+                self.d_ew = self.d_ew / self.degree[:, None]
+                self.d_ew[0,0] = 0
+
+                # connection list
+                self.time_list = torch.zeros((self.n_nodes, self.skip_connection))
+                offsets = torch.arange(1, self.skip_connection)
+                for offset in offsets:
+                    self.time_list.diagonal(-offset).fill_(offset - 1)
+                # Create an upper triangular matrix of ones with zero diagonal
+                # y = torch.triu(x, diagonal=-4)
+                
         if expand_time_dim:
             self.u_ew, self.d_ew = expand_time_dimension(self.u_ew, self.d_ew, T) # in (T, N, k), (T-1, N, k)
         print('u_ew, d_ew shape', self.u_ew.size(), self.d_ew.size())
@@ -73,6 +85,7 @@ class ADMM_algorithm():
         self.DGTV_list = []
         self.DGLR_list = []
         self.GLR_list = []
+        self.recover_list = []
         
         self.res_name = ['zu']
         if self.ablation in ['None', 'DGLR']:
@@ -132,10 +145,15 @@ class ADMM_algorithm():
     
     def apply_op_Ldr(self, x):
         if self.use_line_graph:
-            y = x.clone()
-            y[:,0] = x[:,0] * 0
-            y[:,1:] = x[:,1:] - x[:,:-1]
-            return y
+            if self.skip_connection == 1:
+                y = x.clone()
+                y[:,0] = x[:,0] * 0
+                y[:,1:] = x[:,1:] - x[:,:-1]
+                return y
+            else:
+                # caucluate features
+                features = self.d_ew * x[:,] # (N, skip) * (B, T, N, C)
+
         else:
             B, T, n_channels = x.size(0), x.size(1), x.size(-1)
             pad_x = torch.zeros_like(x[:,:,0:1])
@@ -367,7 +385,10 @@ class ADMM_algorithm():
         s = self.apply_op_Ldr(x) - gamma / self.rho
         d = self.mu_d1 / self.rho
         u = torch.abs(s) - d
-        return torch.sign(s) * u * (u > 0)        
+        return torch.sign(s) * u * (u > 0)     
+
+    def two_loops(self, y, mask=None, differential=False):
+        pass   
 
     def combined_loop(self, y, mask=None, differential=False):
         '''
@@ -478,6 +499,12 @@ class ADMM_algorithm():
             # dual_residual.append(torch.norm(-self.rho_u * (zu - zu_old)).item())
             dual_residual.append(torch.norm(zu - zu_old).item())
             self.GLR_list.append(self.GLR(x))
+            if mask is not None:
+                Hx = x * mask
+            else:
+                Hx = x[:, :self.t_in]
+            assert Hx.size() == y.size(), f'Hx size {Hx.size()}, y size {y.size()} not equal'
+            self.recover_list.append(torch.norm(Hx - y).item())
 
             if self.ablation in ['None', 'DGLR']:
                 primal_residual.append(torch.norm(phi - self.apply_op_Ldr(x)).item())
@@ -510,9 +537,19 @@ class ADMM_algorithm():
         print(p_res.shape, d_res.shape, x_shift.shape)
         res = torch.cat((p_res, d_res, x_shift), 1)
         legend = ['pri_' + s for s in self.res_name] + ['dual_'+ s for s in self.res_name] + ['dual_x']
+        residual_dict = {
+            # 'pri_x': r'$\Vert x - z^u \Vert_2$',
+            'pri_zu': r'$\Vert x - z_u \Vert_2$',
+            'pri_phi': r'$\Vert \phi - L^d_r x \Vert_2$',
+            'pri_zd': r'$\Vert x - z_d \Vert_2$',
+            'dual_zu': r'$\Vert z^u - z_u^{old} \Vert_2$',
+            'dual_phi': r'$\Vert \phi - \phi^{old} \Vert_2$',
+            'dual_zd': r'$\Vert z_d - z_d^{old} \Vert_2$',
+            'dual_x': r'$\Vert x - x^{old} \Vert_2$'
+        }
         plt.figure()
         plt.plot(torch.arange(0, iters, 1), res)
-        plt.legend(legend)
+        plt.legend([residual_dict[l] for l in legend])
         if descriptions is not None:
             plt.title(f'Residuals in ADMM ({descriptions})')
         else:
@@ -537,19 +574,19 @@ class ADMM_algorithm():
             plt.yscale('log')
         plt.plot(torch.arange(start_iters, iters, 1), dxps[start_iters:,show_list])
         for j in show_list:
-            plt.annotate('dual_x_%d' % j, (iters-1, dxps[-1, j]), textcoords="offset points", xytext=(0,5), ha='center')
+            plt.annotate(r'$\Vert\Delta x_{%d}\Vert_2$' % j, (iters-1, dxps[-1, j]), textcoords="offset points", xytext=(0,5), ha='center')
         # plt.legend(legend)
         if descriptions is not None:
-            plt.title(f'Dual_x for each time step ({descriptions})')
+            plt.title(f'Delta_x for each time step ({descriptions})')
         else:
-            plt.title('Dual_x for each time step')
+            plt.title('Delta_x for each time step')
         plt.show()
         if save_path is not None:
             plt.savefig(save_path)
         plt.close()
 
 
-    def plot_CG_params(self, descriptions=None, save_path=None):
+    def plot_CG_params(self, descriptions=None, save_path=None, discriptions=None, log_y=False):
         iters = len(self.p_res_list)
         p_res = torch.Tensor(self.p_res_list)
         d_res = torch.Tensor(self.d_res_list)
@@ -569,7 +606,7 @@ class ADMM_algorithm():
             plt.savefig(save_path)
         plt.close()
     
-    def plot_regularization_terms(self, save_path=None):
+    def plot_regularization_terms(self, save_path=None, descriptions=None, log_y=False):
         iters = len(self.GLR_list)
         glr = torch.Tensor(self.GLR_list)
         plt.figure()
@@ -580,6 +617,19 @@ class ADMM_algorithm():
         if self.ablation in ['DGLR', 'None']:
             dgtv = torch.Tensor(self.DGTV_list)
             plt.plot(torch.arange(0, iters, 1), dgtv, label='DGTV')
+        # plot recover error
+        recover = torch.Tensor(self.recover_list)
+        plt.plot(torch.arange(0, iters, 1), recover, label=r'$\Vert \mathbf{Hx} - \mathbf{y} \Vert_2$')
+        plt.legend()
+        if descriptions is not None:
+            plt.title(f'Regularization terms in ADMM ({descriptions})')
+        else:
+            plt.title('Regularization terms in ADMM')
+
+        plt.xlabel('ADMM iterations')
+        if log_y:
+            plt.yscale('log')
+
         plt.show()
         if save_path is not None:
             plt.savefig(save_path)
