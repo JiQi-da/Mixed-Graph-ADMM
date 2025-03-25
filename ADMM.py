@@ -33,21 +33,23 @@ class ADMM_algorithm():
         if not self.use_line_graph:
             self.d_ew = directed_graph_from_distance(self.connect_list, self.dist_list, d_sigma=d_sigma, regularized=True)
         else:
-            self.d_ew = torch.ones((self.n_nodes, self.T, self.skip_connection))
             if self.skip_connection > 1:
-                self.d_ew = torch.tril(self.d_ew, diagonal=-1)
-                self.d_ew[0,0] = 1
-                self.degree = self.d_ew.sum(1)
-                self.d_ew = self.d_ew / self.degree[:, None]
-                self.d_ew[0,0] = 0
+                self.d_ew = torch.ones((self.n_nodes, self.T, self.skip_connection)) # TODO: change by attention machenism
+                self.d_ew.tril_(diagonal=-1)
+                self.d_ew[:,0,0].fill_(1)
+                self.d_ew = self.d_ew / self.d_ew.sum(-1, keepdim=True)
+                self.d_ew[:,0,0].fill_(0)
+
+                self.d_ew = self.d_ew.permute(1, 2, 0) # in (T, skip, N)
 
                 # connection list
-                self.time_list = torch.zeros((self.T, self.skip_connection))
-                offsets = torch.arange(1, self.T)
-                for offset in offsets:
-                    self.time_list.diagonal(-offset).fill_(offset - 1)
-                # Create an upper triangular matrix of ones with zero diagonal
-                # y = torch.triu(x, diagonal=-4)
+                self.time_list = torch.arange(0, self.T).unsqueeze(1) - torch.arange(1, self.skip_connection + 1)
+                # self.time_list = torch.zeros((self.T, self.skip_connection)) # in (T, skip)
+                # offsets = torch.arange(1, self.T)
+                # for offset in offsets:
+                #     self.time_list.diagonal(-offset).fill_(offset - 1)
+                # reverse edge weights and connections
+
                 
         if expand_time_dim:
             self.u_ew, self.d_ew = expand_time_dimension(self.u_ew, self.d_ew, T) # in (T, N, k), (T-1, N, k)
@@ -144,6 +146,7 @@ class ADMM_algorithm():
         return x - weights_features.sum(3)
     
     def apply_op_Ldr(self, x):
+        B, T, N, n_channels = x.size(0), x.size(1), x.size(2), x.size(-1)
         if self.use_line_graph:
             if self.skip_connection == 1:
                 y = x.clone()
@@ -152,7 +155,11 @@ class ADMM_algorithm():
                 return y
             else:
                 # caucluate features
-                features = self.d_ew * x[:,] # (N, skip) * (B, T, N, C)
+                features = (self.d_ew.view(-1, N)[None,:,:, None] * x[:, self.time_list.view(-1),:,:]).reshape(B, T, -1, N, n_channels)# (N, skip) * (B, T, N, C)
+                assert torch.all(features[:,0] == 0), "Features at time 0 should be all zero"
+                y = x - features.sum(2)
+                y[:,0] = y[:,0] * 0
+                return y
 
         else:
             B, T, n_channels = x.size(0), x.size(1), x.size(-1)
@@ -168,11 +175,21 @@ class ADMM_algorithm():
             return y
     
     def apply_op_Ldr_T(self, x:torch.tensor):
+        B, T, n_channels = x.size(0), x.size(1), x.size(-1)
         if self.use_line_graph:
-            y = x.clone()
-            y[:,0] = x[:,0] * 0
-            y[:,:-1] = y[:,:-1] - x[:,1:]
-            return y
+            if self.skip_connection == 1:
+                y = x.clone()
+                y[:,0] = x[:,0] * 0
+                y[:,:-1] = y[:,:-1] - x[:,1:]
+                return y
+            else:
+                features = self.d_ew[None,:,:,:,None] * x[:,:,None,:,:] # in (B, T, skip, N, C)
+                # sum according to diagonals
+                features = torch.stack([features.diagonal(offset=-offset, dim1=1, dim2=2).sum(-1) for offset in range(1, T)], dim=1) # in [(B, N, C)] * (T-1) -> (B, T-1, N, C)
+                y = x.clone()
+                y[:,0] = x[:,0] * 0
+                y[:,:-1] = y[:,:-1] - features
+                return y
         else:
             B ,T, n_channels = x.size(0), x.size(1), x.size(-1)
             if self.use_kNN:

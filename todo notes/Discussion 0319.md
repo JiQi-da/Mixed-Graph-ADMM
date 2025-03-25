@@ -42,7 +42,22 @@ $$
 
 - Edge weights: All 1, normalized
 
-  Matrix `(T, N, t_0)`, $w_{ijk}$ denotes weights of $e(j_{(t=i-k)},j_{(t=i)})$
+  Matrix `(N, T, t_0)`
+
+  Define the connection of station $i$: $\mathbf{W}_i\in\mathbb{R}^{T\times t_0}$:
+  $$
+  \mathbf{W}_i =\begin{bmatrix} *\\
+  w_{10} & *\\
+  w_{21} & w_{20} & *\\
+  \vdots &\vdots & \ddots &\ddots \\
+  w_{t_0-1, t_0-2} & w_{t_0-1, t_0-3} &\cdots & w_{t_0-1,0} & *\\
+  w_{t_0, t_0-1} & w_{t_0, t_0-2} &\cdots & w_{t_0,1} & w_{t_0, 0}\\
+  \vdots &\vdots &\ddots & \vdots &\vdots\\
+  w_{T-1, T-2} & w_{T-1, T-3} & \cdots & w_{T-1, T-t_0} &w_{T-1, T-t_0-1}
+   \end{bmatrix} 
+  $$
+
+  where $w_{jk}$ denotes the weights of edge $i_{(t=k)} \rightarrow i_{(t=j)}$
 
   > Explanations: column $k$ in dimension -1 denotes the connections to its $k$-hop history
 
@@ -52,41 +67,73 @@ $$
 
 - Connection list: Matrix `(T, t_0)`
 
-  in the form $\begin{bmatrix}*\\ 0& *\\1 & 0 & *\\ 2 & 1 & 0 & *\\\vdots & \ddots &\ddots &\ddots &\ddots\\ t_0-2&\cdots&2&1&0&* \\t_0-1 & t_0-2&\cdots&2&1&0\\\vdots &\vdots &\ddots &\vdots&\vdots&\vdots\\T-2 & T-1&\cdots & T-t_0-3 & T- t_0-2 & T-t_0-1\end{bmatrix}$
+  in the form 
+    $$
+  \mathbf{M} =\begin{bmatrix} *\\
+  0 & *\\
+  1 & 0 & *\\
+  \vdots &\vdots & \ddots &\ddots \\
+  t_0-2 & t_0-3 &\cdots & 0 & *\\
+  t_0-1 & t_0-2 &\cdots & 1 & 0\\
+  \vdots &\vdots &\ddots & \vdots &\vdots\\
+  T-2 & T-3 & \cdots & T-t_0 &T-t_0-1
+   \end{bmatrix} 
+  $$
 
-  $M_{ij}$ denotes nodes in time $i$'s $j$-hop history, which is time $i-j$
+  $M_{ij}$ denotes nodes in time $i$'s $j$-hop **history**, which is time $i-j$.
+
+  We generate this connection list using
+  $$
+  \begin{bmatrix}0\\1\\\vdots\\T-1\end{bmatrix}\mathbf{1}_{t_0}^\top -\mathbf{1}_T\begin{bmatrix} 1&2&\cdots&t_0\end{bmatrix} \in\mathbb{R}^{T\times t_0}
+  $$
 
 #### 1.2.2 Operations
 
-`x (B, T, N, C), d_ew (T, N, t_0), time_list (T, t_0)`
+`x (B, T, N, C), d_ew (T, t_0, N), time_list (T, t_0)`
 
-- `apply_op_Ldr` ($\mathbf{L}^d_r\mathbf{x}$): 
+- `apply_op_Ldr` ($\mathbf{L}^d_r\mathbf{x}$): $x_i - \sum_{j} w_{ij} x_j$
+
+  - aggregation of features: multiply each element in $\mathbf{W}$ with $\mathbf{x}$ according to each index in $\mathbf{M}$, then sum up each row
+
+- `apply_op_LdrT` ($(\mathbf{L}^d_r)^\top \mathbf{x}$): $x_j - \sum_{i} w_{ij} x_i$
+
+  - aggregation of features: element-wise mutiply each column in $\mathbf{W}$ with $\mathbf{x}$, then sum up each diagonals from `offset={-1, ..., -T+1}`
+
+detailed implementation in `directed_graph.ipynb`
 
 ## 2 Experiments
 
 ### 2.1 Normalization of node signals
 
-Standardization:
-$$
-\hat{x}=\frac{x-\text{mean}(\bold{x})}{\text{std}(\bold x)}
-$$
-Normalization
-$$
-\hat{x}=\frac{x-\text{mean}(\bold{x})}{\text{std}(\bold x)}
-$$
- 
+- Standardization (mean=0, std=1):
+  $$
+  \hat{x}=\frac{x-\text{mean}(\bold{x})}{\text{std}(\bold x)}
+  $$
+- Normalization (in [0, 1])
+  $$
+  \hat{x}=\frac{x-\text{mean}(\bold{x})}{\text{std}(\bold x)}
+  $$
+
+Perform normalization on each station (*i.e.*, each sequence) 
 
 ### 2.2 Each regularized term of Eq. (5)
 
+- reconstruction error ($\Vert \mathbf{y} - \mathbf{Hx}\Vert_2$)
+- GLR ($\mathbf{x}^\top \mathbf{L}^u \mathbf{x}$)
+- DGLR ($\mathbf{x}^\top \mathcal{L}^d_r \mathbf{x}$)
+- DGTV ($\Vert \mathbf{L}^d_r \mathbf{x}\Vert_1$)
 
 
 ### 2.3 Error with ground-truth
 
+Converging? Comparing?
 
 
-### 2.4 Increasing $\rho$s
+### 2.4 Increasing $\rho$ s
+Increasing $\rho$ speed up the convergence.
 
 ### 2.5 Skip-connection directed graphs
+
 
 
 
