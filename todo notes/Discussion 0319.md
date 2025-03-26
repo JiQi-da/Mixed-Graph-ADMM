@@ -101,6 +101,9 @@ $$
 
 detailed implementation in `directed_graph.ipynb`
 
+#### 1.2.3 Undirected version
+save in 
+
 ## 2 Experiments
 
 ### 2.1 Normalization of node signals
@@ -133,6 +136,9 @@ Converging? Comparing?
 Increasing $\rho$ speed up the convergence.
 
 ### 2.5 Skip-connection directed graphs
+
+### 2.6 Combined-loops
+Use a earlier version: solve the linear systems w.r.t. $\mathbf{x}=\mathbf{z}_u=\mathbf{z}_d$ first, then minimize $\phi$.
 
 
 

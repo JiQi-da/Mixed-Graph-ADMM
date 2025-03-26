@@ -291,8 +291,8 @@ def line_graph(n_nodes):
     weights = torch.ones_like(connect_list).float()
     return connect_list, weights
 
-def expand_time_dimension(u_ew, d_ew, T:int):
-    return u_ew.unsqueeze(0).repeat(T, 1, 1), d_ew.unsqueeze(0).repeat(T - 1, 1, 1)
+def expand_time_dimension(ew, T:int):
+    return ew.unsqueeze(0).repeat(T, 1, 1)# , d_ew.unsqueeze(0).repeat(T - 1, 1, 1)
 
 if __name__ == "__main__":
     edges = torch.tensor([[0,1], [1,2], [2,3], [3,2], [2,1], [1,0]], dtype=torch.int)

@@ -13,6 +13,8 @@ class ADMM_algorithm():
     only with 1 head
     '''
     def __init__(self, graph_info, ADMM_info, use_kNN=False, k=4, u_sigma=None, d_sigma=None, expand_time_dim=True, ablation='None', t_in=12, T=24, use_line_graph=False, skip_connection=1):
+        self.t_in = t_in
+        self.T = T
         self.use_line_graph = use_line_graph
         self.skip_connection = skip_connection
         self.n_nodes = graph_info['n_nodes']
@@ -29,31 +31,30 @@ class ADMM_algorithm():
         self.ablation = ablation
         assert ablation in ['None', 'DGTV', 'DGLR', 'UT'], "ablation should be in [\'None\', \'DGTV\', \'DGLR\', \'UT\']"
         self.u_ew = undirected_graph_from_distance(self.connect_list, self.dist_list, u_sigma=u_sigma, regularized=True)
+        if expand_time_dim:
+            self.u_ew = expand_time_dimension(self.u_ew, T)
         # if self.ablation != 'UT':
         if not self.use_line_graph:
             self.d_ew = directed_graph_from_distance(self.connect_list, self.dist_list, d_sigma=d_sigma, regularized=True)
+            if expand_time_dim:
+                self.d_ew = expand_time_dimension(self.d_ew, T-1)
         else:
-            if self.skip_connection > 1:
-                self.d_ew = torch.ones((self.n_nodes, self.T, self.skip_connection)) # TODO: change by attention machenism
-                self.d_ew.tril_(diagonal=-1)
-                self.d_ew[:,0,0].fill_(1)
-                self.d_ew = self.d_ew / self.d_ew.sum(-1, keepdim=True)
-                self.d_ew[:,0,0].fill_(0)
+            # if self.skip_connection > 1:
+            self.d_ew = torch.ones((self.n_nodes, self.T, self.skip_connection)) # TODO: change by attention machenism
+            self.d_ew.tril_(diagonal=-1)
+            self.d_ew[:,0,0].fill_(1)
+            self.d_ew = self.d_ew / self.d_ew.sum(-1, keepdim=True)
+            self.d_ew[:,0,0].fill_(0)
 
-                self.d_ew = self.d_ew.permute(1, 2, 0) # in (T, skip, N)
+            self.d_ew = self.d_ew.permute(1, 2, 0) # in (T, skip, N)
 
-                # connection list
-                self.time_list = torch.arange(0, self.T).unsqueeze(1) - torch.arange(1, self.skip_connection + 1)
+            # connection list
+            self.time_list = torch.arange(0, self.T).unsqueeze(1) - torch.arange(1, self.skip_connection + 1)
                 # self.time_list = torch.zeros((self.T, self.skip_connection)) # in (T, skip)
                 # offsets = torch.arange(1, self.T)
                 # for offset in offsets:
                 #     self.time_list.diagonal(-offset).fill_(offset - 1)
                 # reverse edge weights and connections
-
-                
-        if expand_time_dim:
-            self.u_ew, self.d_ew = expand_time_dimension(self.u_ew, self.d_ew, T) # in (T, N, k), (T-1, N, k)
-        print('u_ew, d_ew shape', self.u_ew.size(), self.d_ew.size())
         
         self.rho = ADMM_info['rho']
         self.rho_u = ADMM_info['rho_u']
@@ -73,9 +74,10 @@ class ADMM_algorithm():
         self.CG_iter_zd = []
 
         self.max_CG_iter = 100
+        self.max_inner_iter = 100
         self.CG_tol = 1e-8
         self.ADMM_tol = 1e-6
-        self.max_ADMM_iter = 100
+        self.max_ADMM_iter = 150
 
         self.t_in = t_in
         self.T = T
@@ -225,14 +227,15 @@ class ADMM_algorithm():
         y = self.apply_op_Ldr_T(y)
         return y
     
-    def DGTV(self, x):
+    def DGLR(self, x):
         '''
         x in (B, T, N, C)
         return x cLdr x, mean of each batch
         '''
-        return (x * self.apply_op_cLdr(x)).sum((1,2,3)).mean()
+        return (self.apply_op_Ldr(x) ** 2).sum((1,2,3)).mean()
+        # return (x * self.apply_op_cLdr(x)).sum((1,2,3)).mean()
     
-    def DGLR(self, x):
+    def DGTV(self, x):
         '''
         Return: \Vert L^d_r x \Vert_1, mean of each batch
         '''
@@ -405,9 +408,107 @@ class ADMM_algorithm():
         return torch.sign(s) * u * (u > 0)     
 
     def two_loops(self, y, mask=None, differential=False):
-        pass   
+        '''
+        two-loops algorithm
+        Input:
+            y in (B, t_in, N, C)
+        Output:
+            x in (B, T, N, C)
+        '''
+        # 1. primal guess of x
+        if differential:
+            assert mask is None, 'differential mode does not support mask'
+            diff_y = get_data_difference(y)
+            x = initial_guess(diff_y, self.t_in - 1, self.T - 1)
+            x = torch.cat((torch.zeros_like(y[:,0:1]), x), 1)
+            x = torch.cumsum(x, dim=1)
+            
+        if mask is None:
+            x = initial_guess(y, self.t_in, self.T)
+        else:
+            # interpolation
+            x = initial_interpolation(y, mask)
 
-    def combined_loop(self, y, mask=None, differential=False):
+        assert not torch.isnan(self.d_ew).any(), 'Directed graph weights d_ew has NaN value'
+        assert not torch.isnan(self.u_ew).any(), 'Undirected graph weights u_ew has NaN value'
+
+        if self.ablation in ['None', 'DGLR']:
+            gamma = torch.ones_like(x) * 0.1
+            phi = self.apply_op_Ldr(x)
+            assert not torch.isnan(phi).any(), 'initial phi has NaN value'
+
+        for i in range(self.max_ADMM_iter):
+            # minimize x
+            gamma_u, gamma_d = torch.ones_like(x) * 0.1, torch.ones_like(x) * 0.1
+            zu, zd = x.clone(), x.clone()
+
+            for i in range(self.max_inner_iter):
+                x_old = x# .clone()
+                zu_old = zu# .clone()
+                if self.ablation != 'DGLR':
+                    zd_old = zd# .clone()
+
+                Hty = torch.zeros_like(x)
+                Hty[:,0:y.size(1)] = y
+
+                if self.ablation == 'DGTV':
+                    RHS_x = (self.rho_u * zu + self.rho_d * zd) / 2 - (gamma_u + gamma_d) / 2 + Hty
+                elif self.ablation == 'None':
+                    RHS_x = self.apply_op_Ldr_T(gamma + self.rho * phi) / 2 + (self.rho_u * zu + self.rho_d * zd) / 2 - (gamma_u + gamma_d) / 2 + Hty
+                    assert not torch.isnan(gamma + self.rho * phi).any(), f'NaN exists in ADMM loop {i}: gamma {torch.isnan(gamma).any()}, rho {torch.isnan(self.rho).any()}, phi {torch.isnan(phi).any()}'
+                elif self.ablation == 'UT':
+                    RHS_x = (self.rho_u * zu + self.rho_d * zd) / 2 - (gamma_u + gamma_d) / 2 + Hty
+                elif self.ablation == 'DGLR':
+                    RHS_x = self.apply_op_Ldr_T(gamma + self.rho * phi) / 2 + self.rho_u * zu / 2 - gamma_u / 2 + Hty
+                # print(torch.isnan(zu).any(), torch.isnan(zd).any())
+                    assert not torch.isnan(gamma + self.rho * phi).any(), f'NaN exists in ADMM loop {i}: gamma {torch.isnan(gamma).any()}, rho {torch.isnan(self.rho).any()}, phi {torch.isnan(phi).any()}'
+
+                assert not torch.isnan(RHS_x).any(), f'RHS_x has NaN value in ADMM loop {i}: d_ew {torch.isnan(self.d_ew).any()}; (rho_u, rho_d) has NaN ({torch.isnan(self.rho_u).any()}, {torch.isnan(self.rho_d).any()}); (z_u, z_d) has NaN ({torch.isnan(zu).any()}, {torch.isnan(zd).any()}), (gamma_u, gamma_d) has NaN ({torch.isnan(gamma_u).any()}, {torch.isnan(gamma_d).any()})'
+                
+                # solve x with zu, zd, update x
+                x, CG_iter_x, alpha_x, beta_x = self.CG_solver(self.LHS_x, RHS_x, x_old, mask=mask)
+                self.alpha_x.append(alpha_x)
+                self.beta_x.append(beta_x)
+                self.CG_iter_x.append(CG_iter_x)
+                assert not torch.isnan(x).any(), f'RHS_x has NaN value in loop {i}'
+                assert not torch.isinf(x).any() and not torch.isinf(x).any(), f'x has inf value in loop {i}'
+
+                # solve zu, zd with x, update zu, zd
+                RHS_zu = gamma_u / 2 + self.rho_u / 2 * x
+                zu, CG_iter_zu, alpha_zu, beta_zu = self.CG_solver(self.LHS_zu, RHS_zu, zu_old)
+                self.alpha_zu.append(alpha_zu)
+                self.beta_zu.append(beta_zu)
+                self.CG_iter_zu.append(CG_iter_zu)
+                assert not torch.isnan(zu).any(), f'zu has NaN value in loop {i}'
+                # print('RHS_zu, zu', torch.isnan(RHS_zu).any(), RHS_zu.max(), RHS_zu.min(), torch.isnan(zu).any(), zu.max(), zu.min())
+                if self.ablation != 'DGLR':
+                    RHS_zd = gamma_d / 2 + self.rho_d / 2 * x
+                    zd, CG_iter_zd, alpha_zd, beta_zd = self.CG_solver(self.LHS_zd, RHS_zd, zd_old)
+                    self.alpha_zd.append(alpha_zd)
+                    self.beta_zd.append(beta_zd)
+                    self.CG_iter_zd.append(CG_iter_zd)
+                    assert not torch.isnan(zd).any(), f'zd has NaN value in loop {i}'
+                    # assert not torch.isinf(RHS_zd).any() and not torch.isinf(-RHS_zd).any(), f'RHS_zd has inf value in loop {i}'
+                # update admm params
+                gamma_u = gamma_u + self.rho_u * (x - zu)
+                if self.ablation != 'DGLR':
+                    gamma_d = gamma_d + self.rho_d * (x - zd)
+
+                # TODO: residual
+
+            # update phi
+            if self.ablation in ['None', 'DGLR']:
+                phi_old = phi.clone()
+                # print('executed phi update')
+                phi = self.phi_direct(x, gamma)
+                assert not torch.isnan(phi).any(), f"phi has NaN value in loop {i}"
+                gamma = gamma + self.rho * (phi - self.apply_op_Ldr(x))
+                assert not torch.isnan(gamma).any(), f'gamma has NaN {torch.isnan(gamma).any()}'
+
+                # TODO: residual
+
+
+    def combined_loop(self, y, mask=None, differential=False, print_info=True):
         '''
         Input:
             y in (B, t_in, N, C)
@@ -536,8 +637,8 @@ class ADMM_algorithm():
                 self.DGLR_list.append(self.DGLR(x))
             
             # p_res, d_res = max(primal_residual), max(dual_residual)
-
-            print(f'ADMM iters {i}: x_CG_iters {CG_iter_x}, zu_CG_iters {CG_iter_zu}, zd_CG_iters {CG_iter_zd}, pri_err = [{", ".join([f"{err:.4g}" for err in primal_residual])}], dual_err = [{", ".join([f"{err:.4g}" for err in dual_residual])}]')
+            if print_info:
+                print(f'ADMM iters {i}: x_CG_iters {CG_iter_x}, zu_CG_iters {CG_iter_zu}, zd_CG_iters {CG_iter_zd}, pri_err = [{", ".join([f"{err:.4g}" for err in primal_residual])}], dual_err = [{", ".join([f"{err:.4g}" for err in dual_residual])}]')
             self.p_res_list.append(primal_residual)
             self.d_res_list.append(dual_residual)
             # print(f'ADMM iters {i}: pri_err = {p_res}, dual_err = {d_res}')
@@ -565,6 +666,7 @@ class ADMM_algorithm():
             'dual_x': r'$\Vert x - x^{old} \Vert_2$'
         }
         plt.figure()
+        plt.grid()
         plt.plot(torch.arange(0, iters, 1), res)
         plt.legend([residual_dict[l] for l in legend])
         if descriptions is not None:
@@ -582,11 +684,15 @@ class ADMM_algorithm():
     def plot_x_per_step(self, save_path=None, show_list=None, start_iters=0, descriptions=None, log_y=False):
         # print(self.delta_x_per_step)
         iters = len(self.delta_x_per_step)
-        dxps = torch.tensor([item.cpu().detach().numpy() for item in self.delta_x_per_step]) # in (L, 24)
+        # dxps = torch.tensor(np.array([item.cpu().detach().numpy() for item in self.delta_x_per_step])) # in (L, 24)
+        dxps = torch.stack(self.delta_x_per_step, dim=0)
+        # print(dxps.size()) # (np.array([item.cpu().detach().numpy() for item in self.delta_x_per_step])) # in (L, 24)
         if show_list is None:
             show_list = list(range(self.T))
         # legend = [f'dual_x_{i:2d}' for i in show_list]
         plt.figure()
+        plt.grid()
+        plt.xlabel('ADMM iterations')
         if log_y:
             plt.yscale('log')
         plt.plot(torch.arange(start_iters, iters, 1), dxps[start_iters:,show_list])
@@ -610,6 +716,7 @@ class ADMM_algorithm():
         res = torch.cat((p_res, d_res), 1)
         legend = ['alpha_' + s for s in self.res_name] + ['beta_'+ s for s in self.res_name]
         plt.figure()
+        plt.grid()
         plt.plot(torch.arange(0, iters, 1), res)
         plt.legend(legend)
         if descriptions is not None:
@@ -627,6 +734,7 @@ class ADMM_algorithm():
         iters = len(self.GLR_list)
         glr = torch.Tensor(self.GLR_list)
         plt.figure()
+        plt.grid()
         plt.plot(torch.arange(0, iters, 1), glr, label='GLR')
         if self.ablation != 'DGLR':
             dglr = torch.Tensor(self.DGLR_list)
