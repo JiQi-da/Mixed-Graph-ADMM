@@ -1,4 +1,4 @@
-# Discussion 0319
+# Discussion 0326
 
 ## 1 Directed temporal graph with skip-connection
 
@@ -6,9 +6,11 @@
 
 ```mermaid
 graph LR
-1((1)) --> 2((2))
+0((0)) --> 1((1))
+1 --> 2((2))
 2 --> 3((3))
 3 --> 4((4))
+0 --> 2
 1 --> 3
 2 --> 4
 ```
@@ -49,7 +51,7 @@ Define the effects of time step $i$ on time $j$ is **global and uniform**: $a_{j
 - Connection list: Matrix `(T, t_0)`
 
   in the form 
-    $$
+  $$
   \mathbf{M} =\begin{bmatrix} *\\
   0 & *\\
   1 & 0 & *\\
@@ -83,8 +85,6 @@ Define the effects of time step $i$ on time $j$ is **global and uniform**: $a_{j
 detailed implementation in `directed_graph.ipynb`
 
 #### 1.2.3 Undirected version
-save in 
-
 ## 2 Setup
 
 ### 2.1 Normalization of node signals
@@ -118,19 +118,20 @@ After Normalization:
 [metric=iqr] coefficient of variation: 0.2271, variance: 0.0093, peak-to-peak: 0.5112
 ```
 
-### 2.2 Design
+### 2.2 Experimental Setup
 **A. Experiment design (150 iterations)**
 1. Plot the residuals:
-    - Primal residuals:
-    - Dual residuals:
+    - Primal residuals: $\Vert \mathbf{x} - \mathbf{z}_u\Vert_2, \Vert \mathbf{x}-\mathbf{z}_d\Vert_2,\Vert \mathbf{\phi}-\mathbf{L}^d_r\mathbf{x}\Vert_2$
+    - Dual residuals: $\Vert \mathbf{x} -\mathbf{x}^{\text{old}}\Vert_2, \Vert \mathbf{z}_u -\mathbf{z}_u^{\text{old}}\Vert_2, \Vert \mathbf{z}_d -\mathbf{z}_d^{\text{old}}\Vert_2$
 2. Plot convergence curve of each time step $\Vert x_t - x_t^{\text{old}}\Vert_2$
-3. Plot each term of interest:
+3. Plot each term in Eq. (5):
     - reconstruction error ($\Vert \mathbf{y} - \mathbf{Hx}\Vert_2$)
     - GLR ($\mathbf{x}^\top \mathbf{L}^u \mathbf{x}$)
     - DGLR ($\mathbf{x}^\top \mathcal{L}^d_r \mathbf{x}$)
     - DGTV ($\Vert \mathbf{L}^d_r \mathbf{x}\Vert_1$)
 
 **B. Graph Design:**
+
 - directed graph:
   - line graph: `0 -> 1 -> 2 -> ... -> T-1`: *Normalized graph weights are all 1*
   - kNN graph: $v_j^t\rightarrow v_i^{t+1}$ if $v_j$ is a $k$-NN of $v_i$
@@ -138,6 +139,7 @@ After Normalization:
 - undirected graph: kNN graph
 
 **C. Grid search of each parameters:**
+
 - For line graph: 
   - ADMM parameters $\mu_u, \mu_{d,1}, \mu_{d,2}$
   - $k, \sigma_u$ for undirected graph ($w_{ij} = \exp(-d_{ij}/\sigma_u)$)
@@ -145,16 +147,16 @@ After Normalization:
 - For line graph with skip-connection: maximum interval
 
 **D. Settings:**
-- Normalized PEMS04
+- Normalized PEMS04 dataset
 - Input $x[0:12]$, predict $x[0:23]$
 - Defaults: $k=4$, $\sigma_u=50$, $\rho=8, \rho_u=4,\rho_d=4$
 
-## 3 Experiments
+## 3 Experiments (grid search)
 ### 3.1 Line Graph (max interval = 1, k = 0)
 
 #### ADMM parameters
 
-$\mu_{d,1} \in \{0.1,0.2,0.5,0.8,1\}$, $\mu_u=1, \mu_{d,2}=1$: (conclusions)
+<font color=red>$\mu_{d,1} \in \{0.1,0.2,0.5,0.8,1\}$, $\mu_u=1, \mu_{d,2}=1$:</font> Lower purple line. $\mu_{d,1}=0.5$ most efficient. *Also reduce the diversity of $\Vert \Delta x_k\Vert$, helps further future prediction to converge.* Reduce DGTV while slightly reducing DGLR.
 
 <div style="display: flex; justify-content: space-between;">
   <img src="figures_0326/no_skip/mu_d1/res_0_1.png" width="33%"/>
@@ -185,8 +187,8 @@ $\mu_{d,1} \in \{0.1,0.2,0.5,0.8,1\}$, $\mu_u=1, \mu_{d,2}=1$: (conclusions)
   <img src="figures_0326/no_skip/mu_d1/dx_1.png" width="33%"/>
   <img src="figures_0326/no_skip/mu_d1/op_1.png" width="33%"/>
 </div>
+<font color=red>$\mu_{d,2} \in \{0.2,0.5,1, 2, 5, 10\}$, $\mu_{d,1}=0.5, \mu_u=1$:</font> Lower purple line. Slightly lower DGTV and DGLR.
 
-$\mu_{d,2} \in \{0.2,0.5,1, 2, 5, 10\}$, $\mu_{d,1}=0.5, \mu_u=1$
 <div style="display: flex; justify-content: space-between;">
   <img src="figures_0326/no_skip/mu_d2/res_0_2.png" width="33%"/>
   <img src="figures_0326/no_skip/mu_d2/dx_0_2.png" width="33%"/>
@@ -216,8 +218,8 @@ $\mu_{d,2} \in \{0.2,0.5,1, 2, 5, 10\}$, $\mu_{d,1}=0.5, \mu_u=1$
   <img src="figures_0326/no_skip/mu_d2/dx_10.png" width="33%"/>
   <img src="figures_0326/no_skip/mu_d2/op_10.png" width="33%"/>
 </div>
+<font color=red>$\mu_{u} \in \{0.2,0.5,1, 2, 5, 10\}$, $\mu_{d,1}=0.5, \mu_{d,2}=10$:</font> Lower the pink line. Doesn't affect $\Vert \Delta x\Vert$ much. Reduce GLR but increase reconstruction error.
 
-$\mu_{u} \in \{0.2,0.5,1, 2, 5, 10\}$, $\mu_{d,1}=0.5, \mu_{d,2}=10$
 <div style="display: flex; justify-content: space-between;">
   <img src="figures_0326/no_skip/mu_u/res_0_2.png" width="33%"/>
   <img src="figures_0326/no_skip/mu_u/dx_0_2.png" width="33%"/>
@@ -250,7 +252,7 @@ $\mu_{u} \in \{0.2,0.5,1, 2, 5, 10\}$, $\mu_{d,1}=0.5, \mu_{d,2}=10$
 
 #### Undirected Graph parameters
 
-$k\in\{2,4,6,8\}$, $\mu_{d,1}=0.5, \mu_{d,2}=1,\mu_u=1$: no significant influence
+<font color=red>$k\in\{2,4,6,8\}$, $\mu_{d,1}=0.5, \mu_{d,2}=1,\mu_u=1$:</font> no significant influence
 
 <div style="display: flex; justify-content: space-between;">
   <img src="figures_0326/no_skip/undirect_kNN/res_2.png" width="33%"/>
@@ -277,7 +279,7 @@ $k\in\{2,4,6,8\}$, $\mu_{d,1}=0.5, \mu_{d,2}=1,\mu_u=1$: no significant influenc
 </div>
 
 
-$\sigma_u\in\{20, 50, 100, 200\}$: no significant influence
+<font color=red>$\sigma_u\in\{20, 50, 100, 200\}$:</font> no significant influence
 
 <div style="display: flex; justify-content: space-between;">
   <img src="figures_0326/no_skip/u_sigma/res_020.png" width="33%"/>
@@ -330,9 +332,9 @@ Need more complex directed graph. Complexity: in spatial (kNN) or temporal (skip
 
 No difference with line graph. *skip-connection matters*
 
-### 3.3 Skip-connection directed graphs
+### <font color=red>3.3 Skip-connection directed graphs</font>
 
-max intervals in [1,2,3,4,5,6]: larger interval increases the convergence speed
+<font color=red>max intervals in [1,2,3,4,5,6]:</font> larger interval increases the convergence speed (better than increasing $\mu_{d,1}$)
 
 <div style="display: flex; justify-content: space-between;">
   <img src="figures_0326/skip/res_1.png" width="33%"/>
@@ -369,7 +371,7 @@ max intervals in [1,2,3,4,5,6]: larger interval increases the convergence speed
   <img src="figures_0326/skip/op_6.png" width="33%"/>
 </div>
 
-$k=4$ may be a good point.
+$k=3,4$ may be a good point.
 
 ## 4 Discussion 
 
@@ -379,5 +381,4 @@ $k=4$ may be a good point.
   - number of layers, number of blocks
 - Data structure: suming diagonals involve loops---not efficient
 - Implementation of Undirected Temporal Graph with skip connections
-
 
